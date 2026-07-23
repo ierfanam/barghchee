@@ -1,0 +1,11 @@
+{
+  "name": "Ilam Electricity Oprator",
+  "description": "An AI-powered operator for the Ilam Province Electricity Distribution Company, providing voice assistance for electricity-related inquiries using web search and Live Audio API.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "prompt": "",
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
