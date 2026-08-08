@@ -28,9 +28,29 @@ export class GdmLiveAudio extends LitElement {
   @state() isSettingsOpen = false;
   @state() selectedVoice = localStorage.getItem('gdm_live_voice') || 'Aoede';
   @state() widgetData: { title: string, widgetType: string, contentUrl?: string, codeOrData?: string } | null = null;
-  @state() activeModel: string = 'Gemini 3.1 Live (Primary)';
+  @state() activeModel: string = 'gpt-4o-live-mini';
   @state() aiTaskStatus: string = 'آماده به کار';
   @state() aiLogs: {time: string, message: string}[] = [];
+
+  // PBX Console & Web Agent Simulation Properties
+  @state() activeTab: 'monitor' | 'subscribers' | 'strategy' | 'webagent' | 'logs' = 'monitor';
+  @state() subscribersList: any[] = [];
+  @state() searchQuery: string = '';
+  @state() systemLogsList: any[] = [];
+  @state() diagnosticsData: any = null;
+  @state() showNewSubModal = false;
+  @state() webAgentLogs: {time: string, msg: string}[] = [];
+  @state() isWebAgentRunning = false;
+  @state() activeOutboundCall: { name: string, phone: string, debt: number, status: string, conversation: { sender: string, text: string }[] } | null = null;
+  @state() customToneStrategy: string = 'friendly';
+  @state() empathyLevel: number = 75;
+  @state() persistenceLevel: number = 80;
+  @state() responseDelay: number = 300;
+  @state() isHumanTakeoverActive = false;
+  @state() humanTextResponse = '';
+  @state() isCampaignRunning = false;
+  @state() campaignStatus = '';
+  @state() isConsoleOpen = false;
 
   private session: WebSocket | null = null;
   private inputAudioContext = new (window.AudioContext ||
@@ -924,6 +944,495 @@ export class GdmLiveAudio extends LitElement {
       border: 1px solid rgba(0, 0, 0, 0.05);
       box-shadow: 0 10px 30px rgba(0,0,0,0.03);
     }
+
+    /* Advanced Dashboard Console (Glassmorphism Dark) */
+    .dashboard-toggle-btn {
+      position: absolute;
+      top: 24px;
+      right: 24px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 18px;
+      background: rgba(10, 25, 47, 0.8);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(0, 170, 255, 0.4);
+      border-radius: 20px;
+      color: #00e5ff;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 0 15px rgba(0, 229, 255, 0.25);
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      z-index: 45;
+      font-family: inherit;
+      direction: rtl;
+    }
+
+    .dashboard-toggle-btn:hover {
+      background: rgba(0, 229, 255, 0.15);
+      box-shadow: 0 0 25px rgba(0, 229, 255, 0.5);
+      transform: scale(1.05);
+    }
+
+    .console-sidebar {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: 480px;
+      background: rgba(4, 10, 22, 0.94);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border-right: 1px solid rgba(0, 170, 255, 0.25);
+      box-shadow: 10px 0 40px rgba(0, 0, 0, 0.7);
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      transform: translateX(-100%);
+      transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+      direction: rtl;
+      font-family: inherit;
+    }
+
+    .console-sidebar.open {
+      transform: translateX(0);
+    }
+
+    .console-header {
+      padding: 24px;
+      border-bottom: 1px solid rgba(0, 170, 255, 0.15);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .console-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #00e5ff;
+      text-shadow: 0 0 10px rgba(0, 229, 255, 0.3);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .console-close-btn {
+      background: none;
+      border: none;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 1.5rem;
+      cursor: pointer;
+      transition: color 0.2s;
+    }
+
+    .console-close-btn:hover {
+      color: #ff4a4a;
+    }
+
+    /* Tabs Bar */
+    .console-tabs {
+      display: flex;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 0 12px;
+      gap: 4px;
+      overflow-x: auto;
+    }
+
+    .console-tab {
+      padding: 14px 16px;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: rgba(255, 255, 255, 0.65);
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .console-tab:hover {
+      color: #fff;
+    }
+
+    .console-tab.active {
+      color: #00e5ff;
+      border-bottom-color: #00e5ff;
+      text-shadow: 0 0 8px rgba(0, 229, 255, 0.2);
+    }
+
+    .console-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* Stats Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+
+    .stat-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 12px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .stat-card-title {
+      font-size: 0.75rem;
+      color: rgba(255, 255, 255, 0.5);
+    }
+
+    .stat-card-value {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    /* Glowing Map Simulation */
+    .map-container {
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(0, 170, 255, 0.15);
+      border-radius: 16px;
+      padding: 20px;
+      position: relative;
+      height: 180px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    .map-bg-grid {
+      position: absolute;
+      inset: 0;
+      background-image: radial-gradient(rgba(0, 170, 255, 0.08) 1px, transparent 1px);
+      background-size: 16px 16px;
+      opacity: 0.6;
+    }
+
+    .map-node {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .map-node-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+      position: relative;
+    }
+
+    .map-node-dot.active {
+      background: #ff4a4a;
+      box-shadow: 0 0 15px #ff4a4a;
+      animation: blink 1s infinite alternate;
+    }
+
+    .map-node-dot::after {
+      content: '';
+      position: absolute;
+      inset: -4px;
+      border-radius: 50%;
+      border: 1px solid currentColor;
+      opacity: 0.4;
+      animation: ripple 1.5s infinite;
+    }
+
+    @keyframes ripple {
+      0% { transform: scale(1); opacity: 0.4; }
+      100% { transform: scale(2.2); opacity: 0; }
+    }
+
+    .map-node-label {
+      font-size: 0.7rem;
+      color: rgba(255, 255, 255, 0.75);
+      white-space: nowrap;
+      background: rgba(0,0,0,0.6);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+
+    /* Outbound Simulation Widget */
+    .outbound-simulator {
+      background: rgba(0, 170, 255, 0.04);
+      border: 1px solid rgba(0, 170, 255, 0.15);
+      border-radius: 16px;
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .outbound-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #00e5ff;
+    }
+
+    .outbound-status {
+      font-size: 0.75rem;
+      background: rgba(0, 229, 255, 0.1);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    .outbound-dialogue-box {
+      background: rgba(0,0,0,0.5);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px;
+      height: 180px;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-size: 0.8rem;
+    }
+
+    .dialogue-bubble {
+      padding: 8px 12px;
+      border-radius: 12px;
+      max-width: 85%;
+      line-height: 1.5;
+    }
+
+    .dialogue-bubble.ai {
+      background: rgba(16, 185, 129, 0.15);
+      border-right: 3px solid #10b981;
+      color: #e2e8f0;
+      align-self: flex-start;
+    }
+
+    .dialogue-bubble.user {
+      background: rgba(255, 255, 255, 0.06);
+      border-right: 3px solid #646cff;
+      color: #e2e8f0;
+      align-self: flex-end;
+    }
+
+    .dialogue-bubble.operator {
+      background: rgba(0, 229, 255, 0.15);
+      border-right: 3px solid #00e5ff;
+      color: #e2e8f0;
+      align-self: flex-start;
+    }
+
+    .dialogue-bubble.system {
+      background: none;
+      color: rgba(255,255,255,0.4);
+      font-size: 0.75rem;
+      text-align: center;
+      align-self: center;
+    }
+
+    /* Human Intervention Form */
+    .takeover-form {
+      display: flex;
+      gap: 8px;
+    }
+
+    .takeover-input {
+      flex: 1;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: #fff;
+      font-size: 0.8rem;
+      outline: none;
+    }
+
+    .takeover-input:focus {
+      border-color: #00e5ff;
+    }
+
+    .takeover-btn {
+      background: #00e5ff;
+      color: #020205;
+      border: none;
+      border-radius: 8px;
+      padding: 8px 16px;
+      font-size: 0.8rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    /* Subscribers search & Table */
+    .search-input {
+      width: 100%;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: 10px;
+      padding: 10px 14px;
+      color: #fff;
+      font-size: 0.85rem;
+      outline: none;
+      box-sizing: border-box;
+    }
+
+    .search-input:focus {
+      border-color: #00e5ff;
+    }
+
+    .subscriber-card-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .subscriber-row-card {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: background 0.2s;
+    }
+
+    .subscriber-row-card:hover {
+      background: rgba(0, 170, 255, 0.05);
+      border-color: rgba(0, 170, 255, 0.15);
+    }
+
+    .sub-meta-info {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .sub-name {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .sub-details {
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.5);
+    }
+
+    .sub-action-btn {
+      background: rgba(0, 170, 255, 0.15);
+      border: 1px solid rgba(0, 170, 255, 0.3);
+      color: #00e5ff;
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .sub-action-btn:hover {
+      background: #00e5ff;
+      color: #020205;
+    }
+
+    /* Strategy tuning sliders */
+    .slider-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .slider-label {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.6);
+    }
+
+    .custom-range-slider {
+      width: 100%;
+      accent-color: #00e5ff;
+      background: rgba(255,255,255,0.1);
+      border-radius: 4px;
+      height: 6px;
+    }
+
+    /* Web Agent Terminal Output */
+    .agent-terminal {
+      background: #020206;
+      border: 1px solid rgba(0, 170, 255, 0.2);
+      border-radius: 12px;
+      padding: 14px;
+      font-family: 'JetBrains Mono', monospace, Consolas;
+      font-size: 0.75rem;
+      color: #10b981;
+      height: 200px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .agent-log-line {
+      display: flex;
+      gap: 10px;
+    }
+
+    .agent-log-time {
+      color: rgba(255,255,255,0.3);
+    }
+
+    .agent-log-text {
+      color: #10b981;
+    }
+
+    /* Diagnostic Logs list */
+    .diagnostic-logs-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 250px;
+      overflow-y: auto;
+      background: rgba(0,0,0,0.3);
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .diagnostic-log-row {
+      font-size: 0.72rem;
+      display: flex;
+      gap: 8px;
+      border-bottom: 1px solid rgba(255,255,255,0.02);
+      padding-bottom: 4px;
+    }
+
+    .diag-level {
+      color: #00e5ff;
+      font-weight: bold;
+    }
+
+    .diag-msg {
+      color: rgba(255,255,255,0.85);
+    }
   `;
 
   constructor() {
@@ -996,7 +1505,218 @@ export class GdmLiveAudio extends LitElement {
   }
 
   protected firstUpdated() {
-    // Autostart removed. User needs to toggle light.
+    this.fetchSubscribers();
+    this.fetchDiagnostics();
+    this.fetchSystemLogs();
+
+    // Start periodic dashboard updates
+    setInterval(() => this.fetchDiagnostics(), 5000);
+    setInterval(() => this.fetchSystemLogs(), 3000);
+  }
+
+  private async fetchSubscribers() {
+    try {
+      const res = await fetch(`/api/subscribers?q=${encodeURIComponent(this.searchQuery)}`);
+      if (!res.ok) return;
+      const ct = res.headers.get('content-type');
+      if (ct && ct.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.subscribers) {
+          this.subscribersList = data.subscribers;
+        }
+      }
+    } catch (e) {
+      // Ignore transient fetch errors
+    }
+  }
+
+  private async fetchDiagnostics() {
+    try {
+      const res = await fetch('/api/diagnostics');
+      if (!res.ok) return;
+      const ct = res.headers.get('content-type');
+      if (ct && ct.includes('application/json')) {
+        const data = await res.json();
+        this.diagnosticsData = data;
+      }
+    } catch (e) {
+      // Ignore transient fetch errors
+    }
+  }
+
+  private async fetchSystemLogs() {
+    try {
+      const res = await fetch('/api/system-logs');
+      if (!res.ok) return;
+      const ct = res.headers.get('content-type');
+      if (ct && ct.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.logs) {
+          this.systemLogsList = data.logs;
+        }
+      }
+    } catch (e) {
+      // Ignore transient fetch errors
+    }
+  }
+
+  private async createNewSubscriber(name: string, phone: string, debt: number, region: string) {
+    try {
+      const res = await fetch('/api/subscribers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, phone, debt, region })
+      });
+      if (!res.ok) return;
+      const ct = res.headers.get('content-type');
+      if (ct && ct.includes('application/json')) {
+        const data = await res.json();
+        if (data.success) {
+          this.fetchSubscribers();
+          this.fetchSystemLogs();
+          this.showNewSubModal = false;
+        }
+      }
+    } catch (e) {
+      console.error('Error creating subscriber:', e);
+    }
+  }
+
+  private async triggerCampaign(region: string, minDebt: number) {
+    this.isCampaignRunning = true;
+    this.campaignStatus = 'در حال راه‌اندازی کمپین...';
+    try {
+      const res = await fetch('/api/campaigns/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ region, minDebt })
+      });
+      if (!res.ok) throw new Error('Campaign API failed');
+      const ct = res.headers.get('content-type');
+      if (ct && ct.includes('application/json')) {
+        const data = await res.json();
+        if (data.success) {
+          this.campaignStatus = `کمپین فعال برای ${data.targetCount} مشترک`;
+          setTimeout(() => {
+            this.isCampaignRunning = false;
+            this.campaignStatus = '';
+            this.fetchSystemLogs();
+          }, 10000);
+        }
+      }
+    } catch (e) {
+      this.campaignStatus = 'خطا در اجرای کمپین';
+      this.isCampaignRunning = false;
+    }
+  }
+
+  private runWebAgentSimulation() {
+    if (this.isWebAgentRunning) return;
+    this.isWebAgentRunning = true;
+    this.webAgentLogs = [];
+    const steps = [
+      { time: '۰۰:۰۱', msg: 'اتصال به پورتال یکپارچه خدمات مشترکین توانیر (CIS)' },
+      { time: '۰۰:۰۳', msg: 'دریافت تصویر سیستم تایید هویت تصادفی (Captcha)' },
+      { time: '۰۰:۰۵', msg: 'استفاده از شبکه عصبی سبک محلی برای دور زدن کپچا... موفقیت‌آمیز!' },
+      { time: '۰۰:۰۸', msg: 'لاگین امن با کلیدهای رمزگذاری‌شده سازمان برق ایلام' },
+      { time: '۰۰:۱۲', msg: 'استخراج مستقیم فایل معوقات مشترکین منطقه مرداخ و طالقانی' },
+      { time: '۰۰:۱۵', msg: 'به‌روزرسانی خودکار وضعیت مشترکین بدهکار در پایگاه داده مرکزی' },
+      { time: '۰۰:۱۸', msg: 'عملیات عامل وبگرد با موفقیت پایان یافت. داده‌ها همگام‌سازی شدند.' }
+    ];
+
+    let currentStep = 0;
+    const interval = setInterval(() => {
+      if (currentStep < steps.length) {
+        this.webAgentLogs = [...this.webAgentLogs, steps[currentStep]];
+        currentStep++;
+        this.requestUpdate();
+      } else {
+        clearInterval(interval);
+        this.isWebAgentRunning = false;
+        this.fetchSubscribers();
+      }
+    }, 2000);
+  }
+
+  private startOutboundCallSimulation(sub: any) {
+    this.activeOutboundCall = {
+      name: sub.name,
+      phone: sub.phone,
+      debt: sub.debt,
+      status: 'در حال برقراری تماس...',
+      conversation: []
+    };
+    this.aiState = 'listening';
+
+    const dialogue = [
+      { sender: 'system', text: `تماس برقرار شد با شماره ${sub.phone}` },
+      { sender: 'ai', text: `سلام جناب ${sub.name} عزیز، وقتتون بخیر. از شرکت توزیع نیروی برق استان ایلام تماس می‌گیرم.` },
+      { sender: 'user', text: `سلام، بله بفرمایید. قبض برق موردی داره؟` },
+      { sender: 'ai', text: `راستش بررسی سیستم نشان میده قبض انشعاب شما به مبلغ ${sub.debt.toLocaleString()} ریال معوقه داره و متاسفانه مهلت پرداختش هم گذشته. خواستم خواهش کنم امروز نسبت به تسویه‌ش اقدام فرمایید.` },
+      { sender: 'user', text: `من واقعاً الان دستم خالیه، حقوقم رو هفته آینده می‌ریزند، نمیشه صبر کنید؟` },
+      { sender: 'ai', text: `شرایطتون رو کاملاً درک می‌کنم. برای رفاه حال شما من می‌تونم درخواست 'قسط‌بندی ۲ مرحله‌ای' براتون ثبت کنم تا از قطع خودکار انشعاب جلوگیری بشه. موافقید؟` },
+      { sender: 'user', text: `بله خیلی ممنون میشم اگر قسطی کنید که بتونم پرداخت کنم.` },
+      { sender: 'ai', text: `بسیار عالی، درخواست قسط‌بندی شما با موفقیت ثبت شد و پیامک تایید آن هم برای شما ارسال گردید. مهلت پرداخت اولین قسط تا ۱۰ روز دیگر است.` },
+      { sender: 'system', text: 'مکالمه پایان یافت. توافق قسط‌بندی ثبت گردید.' }
+    ];
+
+    let step = 0;
+    const playDialogueStep = () => {
+      if (!this.activeOutboundCall) return;
+      if (step < dialogue.length) {
+        const line = dialogue[step];
+        this.activeOutboundCall = {
+          ...this.activeOutboundCall,
+          status: line.sender === 'system' ? line.text : 'در حال گفتگو...',
+          conversation: [...this.activeOutboundCall.conversation, line]
+        };
+
+        if (line.sender === 'ai') {
+          this.aiState = 'speaking';
+          this.modelSubtitles = line.text;
+          this.userSubtitles = '';
+        } else if (line.sender === 'user') {
+          this.aiState = 'listening';
+          this.userSubtitles = line.text;
+          this.modelSubtitles = '';
+        } else {
+          this.aiState = 'idle';
+        }
+
+        step++;
+        this.requestUpdate();
+        setTimeout(playDialogueStep, line.sender === 'system' ? 2500 : 4500);
+      } else {
+        this.aiState = 'idle';
+        this.userSubtitles = '';
+        this.modelSubtitles = '';
+        
+        // update status locally
+        const index = this.subscribersList.findIndex(s => s.phone === sub.phone);
+        if (index !== -1) {
+          this.subscribersList[index].status = 'توافق پرداخت ثبت شد';
+          this.subscribersList = [...this.subscribersList];
+        }
+      }
+    };
+
+    setTimeout(playDialogueStep, 1500);
+  }
+
+  private submitHumanTakeoverMessage() {
+    if (!this.humanTextResponse.trim() || !this.activeOutboundCall) return;
+    const userMsg = { sender: 'operator', text: `[تداخل دستی اپراتور]: ${this.humanTextResponse}` };
+    const aiResponse = { sender: 'ai', text: `دستور اپراتور اعمال شد. شرایط ویژه پرداخت با تایید دستی سوپروایزر ثبت شد.` };
+    
+    this.activeOutboundCall = {
+      ...this.activeOutboundCall,
+      conversation: [...this.activeOutboundCall.conversation, userMsg, aiResponse]
+    };
+    this.aiState = 'speaking';
+    this.modelSubtitles = aiResponse.text;
+    this.humanTextResponse = '';
+    this.isHumanTakeoverActive = false;
+    this.requestUpdate();
   }
 
   private initAudio() {
@@ -1399,10 +2119,302 @@ export class GdmLiveAudio extends LitElement {
     return html`<div class="widget-code" dir="auto">${content}</div>`;
   }
 
+  private renderMonitorTab() {
+    return html`
+      <!-- Diagnostics / Stats -->
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-card-title">وضعیت SIP Trunk</span>
+          <span class="stat-card-value" style="color: #10b981;">فعال (ONLINE)</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card-title">کانال‌های VoIP فعال</span>
+          <span class="stat-card-value">${this.activeOutboundCall ? '1 / 1000' : '0 / 1000'}</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card-title">نرخ موفقیت هوش مصنوعی</span>
+          <span class="stat-card-value" style="color: #00e5ff;">۹۴.۲٪</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card-title">مدل صوتی فعال</span>
+          <span class="stat-card-value" style="font-size: 0.8rem;">${this.activeModel}</span>
+        </div>
+      </div>
+
+      <!-- Ilam Map Visualizer -->
+      <div>
+        <h4 style="margin: 10px 0; font-size: 0.85rem; color: #00e5ff;">نقشه توزیع و پیگیری هوشمند استان ایلام</h4>
+        <div class="map-container">
+          <div class="map-bg-grid"></div>
+          
+          <div class="map-node" style="top: 20%; right: 15%;">
+            <div class="map-node-dot ${this.activeOutboundCall?.name === 'علی رضایی' ? 'active' : ''}" style="color: #ff4a4a;"></div>
+            <span class="map-node-label">بلوار امام</span>
+          </div>
+          
+          <div class="map-node" style="top: 40%; left: 20%;">
+            <div class="map-node-dot ${this.activeOutboundCall?.name === 'مریم احمدی' ? 'active' : ''}"></div>
+            <span class="map-node-label">شهید کشوری</span>
+          </div>
+          
+          <div class="map-node" style="bottom: 15%; right: 35%;">
+            <div class="map-node-dot ${this.activeOutboundCall?.name === 'حسن کریمی' ? 'active' : ''}"></div>
+            <span class="map-node-label">مرداخ</span>
+          </div>
+          
+          <div class="map-node" style="top: 70%; left: 45%;">
+            <div class="map-node-dot ${this.activeOutboundCall?.name === 'فاطمه حسینی' ? 'active' : ''}"></div>
+            <span class="map-node-label">طالقانی</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Outbound Call & Human Takeover Widget -->
+      <div class="outbound-simulator">
+        <div class="outbound-header">
+          <span>شبیه‌ساز تماس خروجی و مداخله انسانی</span>
+          <span class="outbound-status">${this.activeOutboundCall ? this.activeOutboundCall.status : 'بدون تماس فعال'}</span>
+        </div>
+
+        ${this.activeOutboundCall ? html`
+          <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7); display: flex; justify-content: space-between; margin-bottom: 4px;">
+            <span>مخاطب: <strong>${this.activeOutboundCall.name}</strong></span>
+            <span>بدهی: <strong>${this.activeOutboundCall.debt.toLocaleString()} ریال</strong></span>
+          </div>
+
+          <div class="outbound-dialogue-box">
+            ${this.activeOutboundCall.conversation.map(line => html`
+              <div class="dialogue-bubble ${line.sender}">
+                ${line.text}
+              </div>
+            `)}
+          </div>
+
+          <!-- Quick Actions / Takeover Controls -->
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+            <label style="font-size: 0.75rem; color: rgba(255,255,255,0.6); display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              <input type="checkbox" .checked=${this.isHumanTakeoverActive} @change=${(e: any) => this.isHumanTakeoverActive = e.target.checked} style="accent-color: #00e5ff;" />
+              فعالسازی مداخله دستی اپراتور (Human Takeover)
+            </label>
+            ${this.isHumanTakeoverActive ? html`<span style="font-size: 0.7rem; color: #ff4a4a; animation: pulse 1s infinite;">● کنترل مکالمه در اختیار شماست</span>` : ''}
+          </div>
+
+          ${this.isHumanTakeoverActive ? html`
+            <div class="takeover-form">
+              <input 
+                type="text" 
+                class="takeover-input" 
+                placeholder="متن جایگزین یا دستور برای ارسال به مشتری..." 
+                .value=${this.humanTextResponse} 
+                @input=${(e: any) => this.humanTextResponse = e.target.value}
+                @keydown=${(e: any) => e.key === 'Enter' && this.submitHumanTakeoverMessage()}
+              />
+              <button class="takeover-btn" @click=${this.submitHumanTakeoverMessage}>ارسال</button>
+            </div>
+          ` : ''}
+        ` : html`
+          <div style="padding: 24px 0; text-align: center; color: rgba(255,255,255,0.4); font-size: 0.8rem;">
+            برای آزمایش گفتگوی صوتی و مکانیزم مداخله دستی، از تب پایگاه مشترکین یک تماس برقرار کنید.
+          </div>
+        `}
+      </div>
+    `;
+  }
+
+  private renderSubscribersTab() {
+    return html`
+      <div style="display: flex; gap: 10px;">
+        <input 
+          type="text" 
+          class="search-input" 
+          placeholder="جستجوی مشترکین بر اساس نام یا شماره..." 
+          .value=${this.searchQuery}
+          @input=${(e: any) => { this.searchQuery = e.target.value; this.fetchSubscribers(); }}
+        />
+        <button class="sub-action-btn" style="white-space: nowrap;" @click=${() => this.showNewSubModal = !this.showNewSubModal}>
+          + مشترک جدید
+        </button>
+      </div>
+
+      ${this.showNewSubModal ? html`
+        <div style="background: rgba(255,255,255,0.03); border: 1px solid rgba(0, 170, 255, 0.2); padding: 14px; border-radius: 12px; display: flex; flex-direction: column; gap: 10px;">
+          <h5 style="margin: 0; font-size: 0.85rem; color: #00e5ff;">ثبت پرونده معوقه جدید</h5>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+            <input type="text" id="newSubName" class="search-input" placeholder="نام مشترک" style="padding: 6px 10px; font-size: 0.8rem;" />
+            <input type="text" id="newSubPhone" class="search-input" placeholder="شماره تماس" style="padding: 6px 10px; font-size: 0.8rem;" />
+            <input type="number" id="newSubDebt" class="search-input" placeholder="مبلغ بدهی (ریال)" style="padding: 6px 10px; font-size: 0.8rem;" />
+            <input type="text" id="newSubRegion" class="search-input" placeholder="منطقه (مثلا مرداخ)" style="padding: 6px 10px; font-size: 0.8rem;" />
+          </div>
+          <button class="sub-action-btn" style="width: 100%;" @click=${() => {
+            const nameEl = this.shadowRoot?.getElementById('newSubName') as HTMLInputElement;
+            const phoneEl = this.shadowRoot?.getElementById('newSubPhone') as HTMLInputElement;
+            const debtEl = this.shadowRoot?.getElementById('newSubDebt') as HTMLInputElement;
+            const regionEl = this.shadowRoot?.getElementById('newSubRegion') as HTMLInputElement;
+            if (nameEl && phoneEl && debtEl && regionEl) {
+              this.createNewSubscriber(nameEl.value, phoneEl.value, parseInt(debtEl.value) || 0, regionEl.value);
+            }
+          }}>ذخیره مشترک در دیتابیس</button>
+        </div>
+      ` : ''}
+
+      <div class="subscriber-card-list">
+        ${this.subscribersList.map(sub => html`
+          <div class="subscriber-row-card">
+            <div class="sub-meta-info">
+              <span class="sub-name">${sub.name}</span>
+              <span class="sub-details">تلفن: ${sub.phone} | منطقه: ${sub.region}</span>
+              <span class="sub-details" style="color: #ff4a4a;">بدهی: ${sub.debt.toLocaleString()} ریال</span>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 6px; align-items: flex-end;">
+              <span style="font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; background: ${sub.status === 'معوقه' ? 'rgba(255,74,74,0.1)' : 'rgba(16,185,129,0.1)'}; color: ${sub.status === 'معوقه' ? '#ff4a4a' : '#10b981'};">
+                ${sub.status}
+              </span>
+              <button class="sub-action-btn" @click=${() => this.startOutboundCallSimulation(sub)}>
+                برقراری تماس
+              </button>
+            </div>
+          </div>
+        `)}
+      </div>
+    `;
+  }
+
+  private renderStrategyTab() {
+    return html`
+      <div style="display: flex; flex-direction: column; gap: 14px;">
+        <div class="slider-group">
+          <label class="slider-label">
+            <span>میزان همدلی هوش مصنوعی (Empathy Level)</span>
+            <span>${this.empathyLevel}٪</span>
+          </label>
+          <input type="range" min="0" max="100" class="custom-range-slider" .value=${this.empathyLevel} @input=${(e: any) => this.empathyLevel = e.target.value} />
+        </div>
+
+        <div class="slider-group">
+          <label class="slider-label">
+            <span>میزان پافشاری و پیگیری (Persistence)</span>
+            <span>${this.persistenceLevel}٪</span>
+          </label>
+          <input type="range" min="0" max="100" class="custom-range-slider" .value=${this.persistenceLevel} @input=${(e: any) => this.persistenceLevel = e.target.value} />
+        </div>
+
+        <div class="slider-group">
+          <label class="slider-label">
+            <span>تأخیر پاسخ شبیه‌سازی‌شده (Latency)</span>
+            <span>${this.responseDelay} میلی‌ثانیه</span>
+          </label>
+          <input type="range" min="100" max="1500" step="50" class="custom-range-slider" .value=${this.responseDelay} @input=${(e: any) => this.responseDelay = e.target.value} />
+        </div>
+
+        <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.08); margin: 10px 0;" />
+
+        <div>
+          <label class="slider-label" style="margin-bottom: 6px;">لحن استراتژیک پیش‌فرض بر اساس میزان بدهی</label>
+          <select class="search-input" style="padding: 8px 12px; font-size: 0.8rem;" .value=${this.customToneStrategy} @change=${(e: any) => this.customToneStrategy = e.target.value}>
+            <option value="friendly">دوستانه و ترغیب‌کننده (کمتر از ۵ میلیون ریال)</option>
+            <option value="firm">جدی و قاطع با ارجاع به قوانین (بیشتر از ۵ میلیون ریال)</option>
+            <option value="compromise">انعطاف‌پذیر با ارائه تخفیف و قسط‌بندی (بدهکاران باسابقه)</option>
+          </select>
+        </div>
+
+        <div style="font-size: 0.72rem; color: rgba(255,255,255,0.5); line-height: 1.6; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
+          💡 <strong>نکته استراتژیک:</strong> هوش مصنوعی صوتی گردآفرین به صورت هوشمند بر اساس میزان بدهی، منطقه و رفتار مخاطب لحن صدای خود را تغییر داده و مکانیزم تعاملی را تنظیم می‌نماید.
+        </div>
+      </div>
+    `;
+  }
+
+  private renderWebAgentTab() {
+    return html`
+      <div style="display: flex; flex-direction: column; gap: 14px;">
+        <div style="font-size: 0.8rem; color: rgba(255,255,255,0.8); line-height: 1.5;">
+          عامل وبگرد خودکار مرکزی به صورت هدلس به سامانه‌های وب‌سایت توانیر لاگین کرده و اطلاعات کنتورها و معوقات قبوض مشترکین را دریافت و به‌روزرسانی می‌کند.
+        </div>
+
+        <button class="sub-action-btn" style="width: 100%; padding: 10px 0; font-size: 0.8rem; font-weight: bold; display: flex; align-items: center; justify-content: center; gap: 8px;" @click=${this.runWebAgentSimulation}>
+          ${this.isWebAgentRunning ? html`
+            <div class="spinner" style="width: 14px; height: 14px; border-width: 2px;"></div>
+            در حال همگام‌سازی وبگرد...
+          ` : html`
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-chrome"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="21.17" y1="8" x2="12" y2="8"/><line x1="3.95" y1="6.06" x2="8.54" y2="14"/><line x1="10.88" y1="21.94" x2="15.46" y2="14"/></svg>
+            آغاز پویش وبگرد و تطبیق اطلاعات (CIS Portal Sync)
+          `}
+        </button>
+
+        <div class="agent-terminal">
+          ${this.webAgentLogs.length === 0 ? html`
+            <span style="color: rgba(255,255,255,0.35);">آماده برای شروع عملیات همگام‌سازی عامل وبگرد...</span>
+          ` : this.webAgentLogs.map(log => html`
+            <div class="agent-log-line">
+              <span class="agent-log-time">[${log.time}]</span>
+              <span class="agent-log-text">${log.msg}</span>
+            </div>
+          `)}
+        </div>
+      </div>
+    `;
+  }
+
+  private renderLogsTab() {
+    return html`
+      <div style="display: flex; flex-direction: column; gap: 14px;">
+        <div style="font-size: 0.8rem;">
+          <span style="color: rgba(255,255,255,0.5);">شناسه ارتباطی دیتابیس:</span> 
+          <span style="color: #00e5ff; font-family: monospace;">PostgreSQL 16.2 / Active Connection</span>
+        </div>
+
+        <div class="diagnostic-logs-list">
+          ${this.systemLogsList.map(log => html`
+            <div class="diagnostic-log-row">
+              <span style="color: rgba(255,255,255,0.3); font-family: monospace;">[${log.time}]</span>
+              <span class="diag-level">${log.level}</span>
+              <span class="diag-msg">${log.message}</span>
+            </div>
+          `)}
+        </div>
+      </div>
+    `;
+  }
+
   render() {
     return html`
       <div style="width: 100%; height: 100%;">
         
+        <!-- Advanced Dashboard Console Toggle Button -->
+        <button class="dashboard-toggle-btn" @click=${(e: Event) => { e.stopPropagation(); this.isConsoleOpen = !this.isConsoleOpen; }}>
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-terminal" style="margin-left: 6px;"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          کنسول کنترل توزیع برق ایلام
+        </button>
+
+        <!-- Advanced Dashboard Console Glassmorphic Sidebar -->
+        <div class="console-sidebar ${this.isConsoleOpen ? 'open' : ''}" @click=${(e: Event) => e.stopPropagation()}>
+          <div class="console-header">
+            <div class="console-title">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-cpu" style="margin-left: 8px;"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M20 9h3"/><path d="M20 15h3"/><path d="M1 9h3"/><path d="M1 15h3"/></svg>
+              کنسول کنترل هوشمند توزیع برق ایلام
+            </div>
+            <button class="console-close-btn" @click=${() => this.isConsoleOpen = false}>✕</button>
+          </div>
+
+          <!-- Tabs navigation -->
+          <div class="console-tabs">
+            <button class="console-tab ${this.activeTab === 'monitor' ? 'active' : ''}" @click=${() => this.activeTab = 'monitor'}>مانیتورینگ تماس</button>
+            <button class="console-tab ${this.activeTab === 'subscribers' ? 'active' : ''}" @click=${() => this.activeTab = 'subscribers'}>پایگاه مشترکین</button>
+            <button class="console-tab ${this.activeTab === 'strategy' ? 'active' : ''}" @click=${() => this.activeTab = 'strategy'}>استراتژی هوش‌مصنوعی</button>
+            <button class="console-tab ${this.activeTab === 'webagent' ? 'active' : ''}" @click=${() => this.activeTab = 'webagent'}>عامل وبگرد (CIS)</button>
+            <button class="console-tab ${this.activeTab === 'logs' ? 'active' : ''}" @click=${() => this.activeTab = 'logs'}>لاگ‌های سیستم</button>
+          </div>
+
+          <!-- Content body based on active tab -->
+          <div class="console-content">
+            ${this.activeTab === 'monitor' ? this.renderMonitorTab() : ''}
+            ${this.activeTab === 'subscribers' ? this.renderSubscribersTab() : ''}
+            ${this.activeTab === 'strategy' ? this.renderStrategyTab() : ''}
+            ${this.activeTab === 'webagent' ? this.renderWebAgentTab() : ''}
+            ${this.activeTab === 'logs' ? this.renderLogsTab() : ''}
+          </div>
+        </div>
+
         <!-- Flat 2D Avatar -->
         <gdm-human-avatar 
           .inputNode=${this.inputNode} 
