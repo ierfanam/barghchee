@@ -108,7 +108,7 @@ export class GdmLiveAudioVisuals extends LitElement {
     this.canvasCtx = this.canvas.getContext('2d');
   }
 
-  private render() {
+  render() {
     return html`<canvas></canvas>`;
   }
 }

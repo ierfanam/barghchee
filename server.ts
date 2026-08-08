@@ -9,7 +9,7 @@ import * as cheerio from "cheerio";
 import { GoogleGenAI } from "@google/genai";
 
 import { createRequire } from "module";
-const nodeRequire = typeof require !== 'undefined' ? require : createRequire(import.meta.url);
+const nodeRequire = typeof __filename !== 'undefined' ? createRequire(__filename) : createRequire(import.meta.url);
 
 dotenv.config();
 
@@ -21,7 +21,95 @@ async function startServer() {
   app.use(cors());
 
   // API Routes
+  const transcriptsStore: any[] = [];
+  const systemLogs: { time: string; level: string; message: string }[] = [
+    { time: new Date().toISOString(), level: 'INFO', message: 'PBX Virtual Switch initialized successfully.' },
+    { time: new Date().toISOString(), level: 'INFO', message: 'Gemini Live API bridge ready on port 3000.' }
+  ];
 
+  // In-memory subscribers database cache
+  let subscribersCache: any[] = [
+    { id: "sub-1", billId: "1092837465012", name: "محمد رضایی", region: "مرداخ ایلام", phone: "09181234567", debt: 850000, status: "بدهکار", averageConsumption: "340 kWh", lastPayment: "1403/09/15" },
+    { id: "sub-2", billId: "2093847561023", name: "علی مرادی", region: "خیابان طالقانی ایلام", phone: "09189876543", debt: 450000, status: "در انتظار پرداخت", averageConsumption: "290 kWh", lastPayment: "1403/10/01" },
+    { id: "sub-3", billId: "3049586712345", name: "زهرا عباسی", region: "شهرک شهید کشوری", phone: "09184567890", debt: 0, status: "خوش حساب", averageConsumption: "180 kWh", lastPayment: "1403/11/10" },
+    { id: "sub-4", billId: "4059678312456", name: "رضا کریمی", region: "بلوار امام (ره)", phone: "09183216549", debt: 1250000, status: "قطع انشعاب در آستانه", averageConsumption: "520 kWh", lastPayment: "1403/07/20" }
+  ];
+
+  app.get("/api/subscribers", (req, res) => {
+    const q = (req.query.q as string || "").toLowerCase();
+    if (!q) return res.json({ subscribers: subscribersCache });
+    const filtered = subscribersCache.filter(s => 
+      s.name.toLowerCase().includes(q) || 
+      s.billId.includes(q) || 
+      s.phone.includes(q) ||
+      s.region.toLowerCase().includes(q)
+    );
+    res.json({ subscribers: filtered });
+  });
+
+  app.post("/api/subscribers", (req, res) => {
+    const newSub = {
+      id: `sub-${Date.now()}`,
+      billId: req.body.billId || String(Math.floor(1000000000000 + Math.random() * 9000000000000)),
+      name: req.body.name || 'مشترک جدید',
+      region: req.body.region || 'ایلام',
+      phone: req.body.phone || '09180000000',
+      debt: Number(req.body.debt) || 0,
+      status: req.body.status || 'فعال',
+      averageConsumption: req.body.averageConsumption || '250 kWh',
+      lastPayment: req.body.lastPayment || '1403/11/01'
+    };
+    subscribersCache.push(newSub);
+    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Subscriber added: ${newSub.name} (${newSub.billId})` });
+    res.json({ success: true, subscriber: newSub });
+  });
+
+  app.post("/api/campaigns/run", (req, res) => {
+    const { region, minDebt } = req.body;
+    const targetSubscribers = subscribersCache.filter(s => s.debt >= (Number(minDebt) || 500000));
+    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Automated debt collection campaign started for region: ${region || 'همه مناطق'}, target count: ${targetSubscribers.length}` });
+    
+    // Simulate campaign execution in background
+    setTimeout(() => {
+      systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Automated campaign completed. Calls placed: ${targetSubscribers.length}, Promised payments: ${Math.floor(targetSubscribers.length * 0.7)}` });
+    }, 3000);
+
+    res.json({
+      success: true,
+      message: `کمپین وصول مطالبات با موفقیت برای ${targetSubscribers.length} مشترک آغاز شد.`,
+      targetCount: targetSubscribers.length,
+      subscribers: targetSubscribers
+    });
+  });
+
+  app.get("/api/diagnostics", (req, res) => {
+    res.json({
+      status: "healthy",
+      uptime: process.uptime(),
+      memoryUsage: process.memoryUsage(),
+      activeTranscripts: transcriptsStore.length,
+      logsCount: systemLogs.length,
+      nodeVersion: process.version,
+      platform: process.platform,
+      timestamp: new Date().toISOString()
+    });
+  });
+
+  app.get("/api/system-logs", (req, res) => {
+    res.json({ logs: systemLogs.slice(-50) });
+  });
+
+  app.get("/api/transcripts", (req, res) => {
+    res.json({ transcripts: transcriptsStore });
+  });
+
+  app.post("/api/transcripts", (req, res) => {
+    const { title, content, timestamp } = req.body;
+    const item = { id: `tr-${Date.now()}`, title: title || 'گفتگوی جدید', content: content || '', timestamp: timestamp || new Date().toISOString() };
+    transcriptsStore.push(item);
+    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Transcript saved: ${item.title}` });
+    res.json({ success: true, transcript: item });
+  });
 
   app.post("/api/make-call", async (req, res) => {
     const { number } = req.body;
@@ -52,7 +140,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.use((req, res, next) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
@@ -318,6 +406,17 @@ async function startServer() {
                   }
                 },
                 {
+                  name: 'querySubscriberDatabase',
+                  description: 'Searches the local subscriber database by any of the unique details provided by the user (such as Name, National ID, Phone Number, etc.) to find their Bill ID (شناسه قبض) and other information. The database contains data for Ilam province subscribers.',
+                  parameters: {
+                    type: 'OBJECT',
+                    properties: {
+                      query: { type: 'STRING', description: 'The search query (Name, National ID, or Phone Number) to look up in the database.' }
+                    },
+                    required: ['query']
+                  }
+                },
+                {
                   name: 'executeNodeCode',
                   description: 'Executes arbitrary Node.js code securely. Use this for complex web scraping, parsing HTML with cheerio, or making advanced HTTP requests with axios to sites like bargheman.com. The code MUST be a function body that returns a Promise or a value. Example: `const axios = require("axios"); const cheerio = require("cheerio"); const res = await axios.get("url"); const $ = cheerio.load(res.data); return $("title").text();`',
                   parameters: {
@@ -518,6 +617,42 @@ async function startServer() {
                     } catch (e: any) {
                       console.error('Execute Node Code Failed:', e);
                       responseData = { error: 'Execution failed: ' + e.message };
+                    }
+                    break;
+                  case 'querySubscriberDatabase':
+                    clientWs.send(JSON.stringify({ statusUpdate: 'در حال جستجو در پایگاه داده مشترکین...' }));
+                    try {
+                      const queryStr = call.args?.query || '';
+                      if (!queryStr) {
+                         responseData = { error: 'کوئری جستجو خالی است.' };
+                         break;
+                      }
+                      const fs = nodeRequire('fs');
+                      const path = nodeRequire('path');
+                      const csvFilePath = path.join(process.cwd(), 'data.csv');
+                      const fileContent = fs.readFileSync(csvFilePath, 'utf-8');
+                      const lines = fileContent.split('\n');
+                      const headers = lines[0].split(',');
+                      
+                      const results = [];
+                      for (let i = 1; i < lines.length; i++) {
+                         if (!lines[i].trim()) continue;
+                         if (lines[i].includes(queryStr)) {
+                            const cols = lines[i].split(',');
+                            const record: Record<string, string> = {};
+                            headers.forEach((h: string, idx: number) => { 
+                               record[h.trim()] = cols[idx]; 
+                            });
+                            results.push(record);
+                         }
+                      }
+                      if (results.length > 0) {
+                         responseData = { status: 'success', count: results.length, matches: results.slice(0, 5) };
+                      } else {
+                         responseData = { status: 'not_found', message: 'مشترکی با این مشخصات یافت نشد.' };
+                      }
+                    } catch (e: any) {
+                      responseData = { error: 'Failed to query database: ' + e.message };
                     }
                     break;
                   default:

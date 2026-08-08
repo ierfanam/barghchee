@@ -114,7 +114,7 @@ export class GdmLiveAudioVisuals3D extends LitElement {
       powerPreference: "high-performance"
     });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.2;
     this.renderer = renderer;
@@ -206,7 +206,7 @@ export class GdmLiveAudioVisuals3D extends LitElement {
     this.logoGroup.add(this.pulseRing);
 
     // --- Particle Swarm (Data Stream) ---
-    const particleCount = 3000;
+    const particleCount = 200;
     this.particlesGeometry = new THREE.BufferGeometry();
     const particlePositions = new Float32Array(particleCount * 3);
     const particleColors = new Float32Array(particleCount * 3);
