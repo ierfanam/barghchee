@@ -1990,15 +1990,17 @@ export class GdmLiveAudio extends LitElement {
       this.isRecording = true;
       this.aiState = 'listening';
       this.updateStatus('');
-    } catch (err) {
-      console.error('Error starting recording:', err?.message || err);
-      let errorText = err.message;
-      if (err.name === 'NotAllowedError' || errorText?.includes('Permission denied')) {
-        errorText = 'دسترسی میکروفون مسدود شده است. لطفاً برنامه را در یک تب جدید باز کنید (آیکون Open in New Tab در بالا سمت راست) و دسترسی میکروفون را مجاز کنید.';
+    } catch (err: any) {
+      let errorText = err?.message || String(err);
+      const isPermissionError = err.name === 'NotAllowedError' || errorText?.includes('Permission denied') || errorText?.includes('PermissionDismissedError');
+      if (isPermissionError) {
+        errorText = 'دسترسی میکروفون در آی‌فریم محدود است. برای مکالمه صوتی، برنامه را در تب جدید باز کنید (آیکون Open in New Tab در بالا سمت راست) یا از چت متنی استفاده کنید.';
       } else if (err.name === 'NotFoundError') {
         errorText = 'میکروفونی یافت نشد. لطفاً از اتصال میکروفون خود اطمینان حاصل کنید.';
+      } else {
+        console.warn('Audio recording issue:', errorText);
       }
-      this.updateStatus(`خطا در اتصال: ${errorText}`);
+      this.updateStatus(`${errorText}`);
       this.isLightOn = false;
       this.stopRecording();
     }
