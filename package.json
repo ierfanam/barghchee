@@ -8,7 +8,10 @@
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test:realtime": "tsx server/realtime/fullDuplexState.test.ts && tsx server/realtime/runtimeConfig.test.ts && tsx server/realtime/toolPolicy.test.ts && tsx server/realtime/eventNormalizer.test.ts && tsx server/realtime/config.test.ts && tsx server/realtime/productionGate.test.ts",
+    "verify:realtime": "npm run typecheck && npm run test:realtime && npm run build"
   },
   "dependencies": {
     "@google/genai": "^2.10.0",
@@ -35,7 +38,6 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.185.1",
-    "@types/ws": "^8.18.1",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
