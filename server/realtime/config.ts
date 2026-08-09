@@ -9,7 +9,8 @@ export const DEFAULT_REALTIME_MODEL = process.env.REALTIME_MODEL ?? 'gpt-4o-live
 /** Resolve product aliases to a current OpenAI Realtime API model. */
 export function resolveRealtimeModel(model = DEFAULT_REALTIME_MODEL): string {
   const aliases: Record<string, string> = {
-    'gpt-4o-live': 'gpt-realtime',
+    // Product compatibility label -> current flagship realtime voice model.
+    'gpt-4o-live': 'gpt-realtime-2.1',
   };
   return aliases[model] ?? model;
 }
