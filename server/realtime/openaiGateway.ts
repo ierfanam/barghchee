@@ -1,4 +1,5 @@
 import type { Server } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { OpenAIRealtimeProvider } from './openaiRealtime';
 import { getRealtimeRuntimeConfig } from './config';
@@ -24,7 +25,7 @@ export function attachOpenAIRealtimeGateway(server: Server, path = '/live-openai
 
   wss.on('connection', async client => {
     const runtime = getRealtimeRuntimeConfig();
-    const sessionId = crypto.randomUUID();
+    const sessionId = randomUUID();
     let state: FullDuplexState = createFullDuplexState(sessionId);
 
     const send = (payload: Record<string, unknown>) => {
@@ -130,8 +131,6 @@ export function attachOpenAIRealtimeGateway(server: Server, path = '/live-openai
       try {
         const message = JSON.parse(raw.toString()) as Record<string, unknown>;
         if (typeof message.audio === 'string') {
-          // Input is intentionally accepted regardless of assistant speech state:
-          // microphone capture and assistant playback are independent streams.
           provider.sendAudio(Buffer.from(message.audio, 'base64'));
         } else if (typeof message.text === 'string') {
           provider.sendText(message.text);
