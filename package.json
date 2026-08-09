@@ -9,7 +9,7 @@
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "preview": "vite preview",
-    "test:realtime": "tsx server/realtime/fullDuplexState.test.ts"
+    "test:realtime": "tsx server/realtime/fullDuplexState.test.ts && tsx server/realtime/runtimeConfig.test.ts && tsx server/realtime/toolPolicy.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.10.0",
@@ -35,6 +35,8 @@
     "@types/node": "^22.14.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "@types/three": "^0.185.1",
+    "@types/ws": "^8.18.1",
     "@types/three": "^0.185.1",
     "@types/ws": "^8.18.1",
     "typescript": "~5.8.2",
