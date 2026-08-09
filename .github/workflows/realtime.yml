@@ -15,5 +15,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm run typecheck
       - run: npm run test:realtime
+      - run: npx tsx server/realtime/productionGate.test.ts
       - run: npm run build
