@@ -1,22 +1,31 @@
 export const DEFAULT_REALTIME_PROVIDER = process.env.REALTIME_PROVIDER ?? 'openai';
 
 /**
- * `gpt-4o-live` is intentionally not hard-coded as an API model identifier.
- * OpenAI Realtime model IDs must be supplied/configured with the exact model
- * identifier supported by the account/API deployment. This prevents a UI
- * label from becoming a non-existent API model.
+ * Compatibility alias requested by BARghCHEE.
+ * OpenAI's API expects a supported Realtime model identifier, not the
+ * application label `gpt-4o-live`.
  */
-export const DEFAULT_REALTIME_MODEL =
-  process.env.REALTIME_MODEL ?? 'gpt-4o-realtime-preview';
+export const REALTIME_MODEL_ALIASES: Record<string, string> = {
+  'gpt-4o-live': 'gpt-4o-realtime-preview',
+};
+
+export const DEFAULT_REALTIME_MODEL_ALIAS =
+  process.env.REALTIME_MODEL ?? 'gpt-4o-live';
+
+export function resolveRealtimeModel(modelOrAlias: string): string {
+  return REALTIME_MODEL_ALIASES[modelOrAlias] ?? modelOrAlias;
+}
 
 export interface RealtimeRuntimeConfig {
   provider: string;
+  modelAlias: string;
   model: string;
 }
 
 export function getRealtimeRuntimeConfig(): RealtimeRuntimeConfig {
   return {
     provider: DEFAULT_REALTIME_PROVIDER,
-    model: DEFAULT_REALTIME_MODEL,
+    modelAlias: DEFAULT_REALTIME_MODEL_ALIAS,
+    model: resolveRealtimeModel(DEFAULT_REALTIME_MODEL_ALIAS),
   };
 }
