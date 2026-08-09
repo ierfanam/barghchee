@@ -1,17 +1,28 @@
 export interface RealtimeRuntimeConfig {
-  geminiApiKey: string;
+  provider: string;
+  model: string;
+  openaiApiKey?: string;
+  geminiApiKey?: string;
 }
 
-/**
- * Fail closed when the realtime provider credential is absent.
- * Never manufacture, bypass, or substitute a credential at runtime.
- */
+/** Fail closed; never manufacture, bypass, or substitute a credential. */
 export function loadRealtimeRuntimeConfig(env: NodeJS.ProcessEnv = process.env): RealtimeRuntimeConfig {
-  const geminiApiKey = env.GEMINI_API_KEY?.trim();
+  const provider = (env.REALTIME_PROVIDER ?? 'openai').trim().toLowerCase();
+  const model = (env.REALTIME_MODEL ?? 'gpt-4o-live').trim();
 
-  if (!geminiApiKey) {
-    throw new Error('GEMINI_API_KEY is required for realtime voice sessions.');
+  if (!model) throw new Error('REALTIME_MODEL is required for realtime voice sessions.');
+
+  if (provider === 'openai') {
+    const openaiApiKey = env.OPENAI_API_KEY?.trim();
+    if (!openaiApiKey) throw new Error('OPENAI_API_KEY is required for OpenAI realtime voice sessions.');
+    return { provider, model, openaiApiKey };
   }
 
-  return { geminiApiKey };
+  if (provider === 'gemini') {
+    const geminiApiKey = env.GEMINI_API_KEY?.trim();
+    if (!geminiApiKey) throw new Error('GEMINI_API_KEY is required for Gemini realtime voice sessions.');
+    return { provider, model, geminiApiKey };
+  }
+
+  throw new Error(`Unsupported realtime provider: ${provider}`);
 }
