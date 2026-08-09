@@ -8,7 +8,8 @@
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:realtime": "tsx server/realtime/fullDuplexState.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.10.0",
