@@ -37,8 +37,6 @@
     "@types/react-dom": "^19.2.3",
     "@types/three": "^0.185.1",
     "@types/ws": "^8.18.1",
-    "@types/three": "^0.185.1",
-    "@types/ws": "^8.18.1",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
