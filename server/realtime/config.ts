@@ -1,15 +1,15 @@
 export const DEFAULT_REALTIME_PROVIDER = process.env.REALTIME_PROVIDER ?? 'openai';
 
 /**
- * BARghCHEE's public/default model label. It is an alias, not an assertion
- * that an API endpoint exposes a model literally named `gpt-4o-live`.
+ * BARghCHEE's product-facing compatibility label requested by the project.
+ * It is an alias, not an API model identifier.
  */
 export const DEFAULT_REALTIME_MODEL = process.env.REALTIME_MODEL ?? 'gpt-4o-live';
 
-/** Resolve product aliases to an API model identifier. */
+/** Resolve product aliases to a current OpenAI Realtime API model. */
 export function resolveRealtimeModel(model = DEFAULT_REALTIME_MODEL): string {
   const aliases: Record<string, string> = {
-    'gpt-4o-live': 'gpt-4o-realtime-preview',
+    'gpt-4o-live': 'gpt-realtime',
   };
   return aliases[model] ?? model;
 }
