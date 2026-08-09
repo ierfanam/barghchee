@@ -4,13 +4,15 @@
 
 - Provider: OpenAI Realtime
 - Product model label: `gpt-4o-live`
-- API model resolution: `gpt-realtime`
+- API model resolution: `gpt-realtime-2.1`
 - Input: continuous microphone PCM stream
 - Output: streamed PCM audio
 - Turn detection: provider VAD
 - Full duplex: microphone capture remains active while assistant audio is playing
 - Barge-in: user speech may overlap assistant speech
 - Credentials: server-side only
+
+`gpt-4o-live` is a BARghCHEE compatibility label. It is deliberately resolved to a current OpenAI Realtime API model instead of being sent as a nonexistent API model ID. The selected `gpt-realtime-2.1` model is specifically documented by OpenAI as improving interruption behavior and realtime voice-agent performance.
 
 ## Invariants
 
