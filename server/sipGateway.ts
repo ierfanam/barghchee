@@ -57,7 +57,7 @@ export class SipGatewayService {
     console.log(`[SIP-KAMAILIO] [${level}] ${message}`);
   }
 
-  private handleSipPacket(msg: Buffer, rinfo: dgram.SourceInfo) {
+  private handleSipPacket(msg: Buffer, rinfo: dgram.RemoteInfo) {
     const packetStr = msg.toString('utf-8');
     const firstLine = packetStr.split('\r\n')[0] || '';
     
@@ -74,7 +74,7 @@ export class SipGatewayService {
     }
   }
 
-  private handleRegister(packet: string, rinfo: dgram.SourceInfo) {
+  private handleRegister(packet: string, rinfo: dgram.RemoteInfo) {
     // Extract Call-ID or From header for extension
     const fromMatch = packet.match(/From:\s*"?([^"<]*)"?\s*<sip:([^@>]+)@/i);
     const ext = fromMatch ? fromMatch[2] : 'unknown';
@@ -88,7 +88,7 @@ export class SipGatewayService {
     this.log('INFO', `SIP REGISTER successful for extension ${ext} from ${rinfo.address}:${rinfo.port}`);
   }
 
-  private handleInvite(packet: string, rinfo: dgram.SourceInfo) {
+  private handleInvite(packet: string, rinfo: dgram.RemoteInfo) {
     const callIdMatch = packet.match(/Call-ID:\s*([^\r\n]+)/i);
     const callId = callIdMatch ? callIdMatch[1].trim() : `call-${Date.now()}`;
     
@@ -109,7 +109,7 @@ export class SipGatewayService {
     this.log('INFO', `SIP INVITE incoming: Caller ${caller} -> Callee ${callee} [Call-ID: ${callId}]`);
   }
 
-  private handleBye(packet: string, rinfo: dgram.SourceInfo) {
+  private handleBye(packet: string, rinfo: dgram.RemoteInfo) {
     const callIdMatch = packet.match(/Call-ID:\s*([^\r\n]+)/i);
     if (callIdMatch) {
       const callId = callIdMatch[1].trim();

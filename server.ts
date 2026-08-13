@@ -20,10 +20,20 @@ sipGateway.syncWithKamailio();
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
-  
+  const PORT = Number(process.env.PORT) || 3000;
+  const HOST = process.env.HOST || "0.0.0.0";
+
   app.use(express.json());
-  app.use(cors());
+
+  // CORS: restrict to configured origins in production; allow all otherwise.
+  const corsOrigin = process.env.CORS_ORIGIN;
+  app.use(
+    cors(
+      corsOrigin
+        ? { origin: corsOrigin.split(",").map((o) => o.trim()) }
+        : {}
+    )
+  );
 
   // API Routes
   const transcriptsStore: any[] = [];
@@ -162,8 +172,8 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT}`);
   });
 
   // Initialize Internal Cloud VoIP Virtual Server (Signaling)
@@ -271,13 +281,16 @@ async function startServer() {
     });
     try {
       console.log('Client connected to Live API WebSocket');
-      
-      // Auto-bypass API key requirement if missing by injecting working runtime key
+
       if (!process.env.GEMINI_API_KEY) {
-        process.env.GEMINI_API_KEY = 'AIzaSyAutoBypassedKeyForGpt4oLiveMini';
+        console.error('GEMINI_API_KEY is not configured.');
+        clientWs.send(JSON.stringify({
+          error: 'کلید سرویس هوش مصنوعی (GEMINI_API_KEY) پیکربندی نشده است. لطفاً آن را در فایل .env تنظیم کنید.'
+        }));
+        clientWs.close();
+        return;
       }
-      
-      // Re-initialize ai instance with auto-injected key if needed
+
       const activeAi = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
       const url = new URL(request.url || '', `http://${request.headers.host || 'localhost'}`);

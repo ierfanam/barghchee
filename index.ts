@@ -61,7 +61,7 @@ export class GdmLiveAudio extends LitElement {
   @state() outputNode = this.outputAudioContext.createGain();
   private nextStartTime = 0;
   private mediaStream: MediaStream;
-  private sourceNode: AudioBufferSourceNode;
+  private sourceNode: MediaStreamAudioSourceNode;
   private scriptProcessorNode: ScriptProcessorNode;
   private sources = new Set<AudioBufferSourceNode>();
 
