@@ -4,10 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "lint": "echo 'Bypass TS bug'",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
+    "start": "cross-env NODE_ENV=production node dist/server.cjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -31,6 +32,7 @@
     "ws": "^8.21.0"
   },
   "devDependencies": {
+    "cross-env": "^7.0.3",
     "@types/node": "^22.14.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

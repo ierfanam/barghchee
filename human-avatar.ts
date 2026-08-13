@@ -3,6 +3,38 @@ import {customElement, property} from 'lit/decorators.js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
+function cflHelixPoint(t: number): THREE.Vector3 {
+  const turns = 4.5;
+  const radius = 0.10;
+  const height = 0.6;
+  const startY = 0.0;
+
+  if (t < 0.48) {
+    const p = t / 0.48;
+    const angle = p * Math.PI * 2 * turns;
+    const y = startY - p * height;
+    return new THREE.Vector3(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
+  } else if (t > 0.52) {
+    const p = (t - 0.52) / 0.48;
+    const y = startY - height + p * height;
+    const angle = (1 - p) * Math.PI * 2 * turns + Math.PI;
+    return new THREE.Vector3(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
+  } else {
+    const p = (t - 0.48) / 0.04;
+    const angle = p * Math.PI;
+    const y = startY - height - Math.sin(angle) * 0.02;
+    return new THREE.Vector3(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
+  }
+}
+
+function buildCflHelixCurve(segments = 300): THREE.CatmullRomCurve3 {
+  const points: THREE.Vector3[] = [];
+  for (let i = 0; i <= segments; i++) {
+    points.push(cflHelixPoint(i / segments));
+  }
+  return new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.1);
+}
+
 @customElement('gdm-human-avatar')
 export class GdmHumanAvatar extends LitElement {
   @property({type: String}) aiState: 'idle' | 'listening' | 'processing' | 'speaking' = 'idle';
@@ -231,32 +263,9 @@ export class GdmHumanAvatar extends LitElement {
     group.add(baseGroup);
 
     // 4. Spiral CFL Tube
-    const cflHelix = new THREE.Curve<THREE.Vector3>();
-    cflHelix.getPoint = function(t: number, optionalTarget = new THREE.Vector3()) {
-        const turns = 4.5;
-        const radius = 0.10; 
-        const height = 0.6;
-        const startY = 0.0;
-        
-        if (t < 0.48) {
-            const p = t / 0.48; 
-            const angle = p * Math.PI * 2 * turns;
-            const y = startY - p * height;
-            return optionalTarget.set(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
-        } else if (t > 0.52) {
-            const p = (t - 0.52) / 0.48; 
-            const y = startY - height + p * height;
-            const angle = (1 - p) * Math.PI * 2 * turns + Math.PI;
-            return optionalTarget.set(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
-        } else {
-            const p = (t - 0.48) / 0.04; 
-            const angle = p * Math.PI;
-            const y = startY - height - Math.sin(angle) * 0.02; 
-            return optionalTarget.set(Math.cos(angle) * radius, y, Math.sin(angle) * radius);
-        }
-    };
-    
-    const tubeGeo = new THREE.TubeGeometry(cflHelix as any, 300, 0.025, 32, false);
+    const cflHelix = buildCflHelixCurve(300);
+
+    const tubeGeo = new THREE.TubeGeometry(cflHelix, 300, 0.025, 32, false);
     
     this.bulbMaterial = new THREE.MeshStandardMaterial({
         color: 0xffffff,
