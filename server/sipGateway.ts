@@ -28,13 +28,32 @@ export class SipGatewayService {
       this.udpServer = dgram.createSocket('udp4');
 
       this.udpServer.on('error', (err) => {
-        this.log('ERROR', `SIP UDP socket error: ${err.message}`);
+        this.log('WARN', `SIP UDP socket error: ${err.message}`);
         try {
-          // Fallback to high port if 5060 is restricted
-          this.udpServer?.bind(5065, '0.0.0.0', () => {
-            this.log('INFO', 'SIP UDP Gateway listening on fallback port 5065.');
-          });
+          this.udpServer?.close();
         } catch (e) {}
+        this.udpServer = null;
+
+        // Try fallback port if standard 5060 failed
+        if (this.port === 5060) {
+          try {
+            const fallbackSocket = dgram.createSocket('udp4');
+            fallbackSocket.on('error', (fbErr) => {
+              this.log('WARN', `SIP UDP fallback socket error: ${fbErr.message}`);
+              try { fallbackSocket.close(); } catch (e) {}
+            });
+            fallbackSocket.on('message', (msg, rinfo) => {
+              this.handleSipPacket(msg, rinfo);
+            });
+            fallbackSocket.bind(5065, '0.0.0.0', () => {
+              this.port = 5065;
+              this.udpServer = fallbackSocket;
+              this.log('INFO', 'SIP UDP Gateway listening on fallback port 5065.');
+            });
+          } catch (e: any) {
+            this.log('WARN', `SIP UDP fallback binding skipped: ${e.message}`);
+          }
+        }
       });
 
       this.udpServer.on('message', (msg, rinfo) => {
@@ -57,7 +76,7 @@ export class SipGatewayService {
     console.log(`[SIP-KAMAILIO] [${level}] ${message}`);
   }
 
-  private handleSipPacket(msg: Buffer, rinfo: dgram.RemoteInfo) {
+  private handleSipPacket(msg: Buffer, rinfo: dgram.SourceInfo) {
     const packetStr = msg.toString('utf-8');
     const firstLine = packetStr.split('\r\n')[0] || '';
     
@@ -74,7 +93,7 @@ export class SipGatewayService {
     }
   }
 
-  private handleRegister(packet: string, rinfo: dgram.RemoteInfo) {
+  private handleRegister(packet: string, rinfo: dgram.SourceInfo) {
     // Extract Call-ID or From header for extension
     const fromMatch = packet.match(/From:\s*"?([^"<]*)"?\s*<sip:([^@>]+)@/i);
     const ext = fromMatch ? fromMatch[2] : 'unknown';
@@ -88,7 +107,7 @@ export class SipGatewayService {
     this.log('INFO', `SIP REGISTER successful for extension ${ext} from ${rinfo.address}:${rinfo.port}`);
   }
 
-  private handleInvite(packet: string, rinfo: dgram.RemoteInfo) {
+  private handleInvite(packet: string, rinfo: dgram.SourceInfo) {
     const callIdMatch = packet.match(/Call-ID:\s*([^\r\n]+)/i);
     const callId = callIdMatch ? callIdMatch[1].trim() : `call-${Date.now()}`;
     
@@ -109,7 +128,7 @@ export class SipGatewayService {
     this.log('INFO', `SIP INVITE incoming: Caller ${caller} -> Callee ${callee} [Call-ID: ${callId}]`);
   }
 
-  private handleBye(packet: string, rinfo: dgram.RemoteInfo) {
+  private handleBye(packet: string, rinfo: dgram.SourceInfo) {
     const callIdMatch = packet.match(/Call-ID:\s*([^\r\n]+)/i);
     if (callIdMatch) {
       const callId = callIdMatch[1].trim();

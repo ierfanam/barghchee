@@ -61,11 +61,177 @@ export class GdmLiveAudio extends LitElement {
   @state() outputNode = this.outputAudioContext.createGain();
   private nextStartTime = 0;
   private mediaStream: MediaStream;
-  private sourceNode: MediaStreamAudioSourceNode;
+  private sourceNode: AudioBufferSourceNode;
   private scriptProcessorNode: ScriptProcessorNode;
   private sources = new Set<AudioBufferSourceNode>();
 
   static styles = css`
+    :host {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      margin: 0;
+      padding: 0;
+      background-color: #ffffff;
+      overflow: hidden;
+      position: relative;
+      font-family: 'Vazirmatn', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    .main-page-container {
+      width: 100vw;
+      height: 100vh;
+      background-color: #ffffff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .logo-center-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      border-radius: 50%;
+      padding: 24px;
+      outline: none;
+      transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .logo-center-wrapper:hover {
+      transform: scale(1.03);
+    }
+
+    .logo-center-wrapper:active {
+      transform: scale(0.97);
+    }
+
+    .center-logo {
+      width: clamp(200px, 32vw, 400px);
+      height: auto;
+      max-height: 52vh;
+      object-fit: contain;
+      user-select: none;
+      -webkit-user-drag: none;
+      filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.05));
+      transition: filter 0.3s ease, transform 0.3s ease;
+      display: block;
+    }
+
+    /* Ambient ripple rings on active/recording */
+    .ripple-ring {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) scale(0.9);
+      border-radius: 50%;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.4s ease;
+    }
+
+    .logo-center-wrapper.recording .ring-1 {
+      width: 108%;
+      height: 108%;
+      border: 2px solid rgba(2, 132, 199, 0.3);
+      animation: rippleEffect 2.4s infinite cubic-bezier(0, 0.2, 0.8, 1);
+    }
+
+    .logo-center-wrapper.recording .ring-2 {
+      width: 122%;
+      height: 122%;
+      border: 1.5px solid rgba(56, 189, 248, 0.25);
+      animation: rippleEffect 2.4s infinite cubic-bezier(0, 0.2, 0.8, 1) 0.8s;
+    }
+
+    .logo-center-wrapper.recording.speaking .center-logo {
+      animation: breathingSpeak 1.6s infinite ease-in-out;
+      filter: drop-shadow(0 10px 32px rgba(2, 132, 199, 0.25));
+    }
+
+    .logo-center-wrapper.recording.listening .center-logo {
+      animation: breathingListen 2.2s infinite ease-in-out;
+      filter: drop-shadow(0 10px 32px rgba(16, 185, 129, 0.22));
+    }
+
+    @keyframes rippleEffect {
+      0% {
+        transform: translate(-50%, -50%) scale(0.9);
+        opacity: 0.8;
+      }
+      100% {
+        transform: translate(-50%, -50%) scale(1.4);
+        opacity: 0;
+      }
+    }
+
+    @keyframes breathingSpeak {
+      0%, 100% {
+        transform: scale(1);
+      }
+      50% {
+        transform: scale(1.04);
+      }
+    }
+
+    @keyframes breathingListen {
+      0%, 100% {
+        transform: scale(1);
+      }
+      50% {
+        transform: scale(1.02);
+      }
+    }
+
+    .minimal-subtitles {
+      position: absolute;
+      bottom: 50px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 90%;
+      max-width: 640px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      pointer-events: none;
+      z-index: 10;
+      align-items: center;
+    }
+
+    .sub-bubble {
+      padding: 12px 24px;
+      border-radius: 9999px;
+      font-size: 15px;
+      line-height: 1.6;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+      border: 1px solid rgba(226, 232, 240, 0.9);
+      backdrop-filter: blur(12px);
+      transition: all 0.3s ease;
+      direction: rtl;
+      text-align: center;
+      max-width: 100%;
+    }
+
+    .sub-bubble.user-bubble {
+      background: rgba(248, 250, 252, 0.95);
+      color: #334155;
+    }
+
+    .sub-bubble.model-bubble {
+      background: rgba(240, 249, 255, 0.98);
+      color: #0369a1;
+      border-color: rgba(186, 230, 253, 0.9);
+    }
+
+    .sub-name {
+      font-weight: 700;
+      margin-left: 6px;
+    }
+
     .room-dark-overlay {
       position: absolute;
       inset: 0;
@@ -413,51 +579,85 @@ export class GdmLiveAudio extends LitElement {
       align-items: center;
       justify-content: center;
     }
+    .input-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.4);
+      backdrop-filter: blur(8px);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
     .input-modal {
-      background: #1e1e1e;
-      padding: 24px;
-      border-radius: 16px;
-      border: 1px solid #333;
+      background: #ffffff;
+      padding: 28px;
+      border-radius: 20px;
+      border: 1px solid #e2e8f0;
       display: flex;
       flex-direction: column;
       gap: 16px;
-      width: 320px;
-      color: white;
-      font-family: system-ui, sans-serif;
+      width: 360px;
+      max-width: 90vw;
+      color: #1e293b;
+      font-family: 'Vazirmatn', sans-serif;
       direction: rtl;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      box-shadow: 0 20px 40px -15px rgba(0,0,0,0.15);
     }
     .input-modal label {
-      font-size: 1.1rem;
-      font-weight: 500;
-      color: #eaeaea;
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: #0f172a;
     }
     .input-modal input {
-      background: #000;
-      border: 1px solid #444;
-      color: white;
+      background: #f8fafc;
+      border: 1.5px solid #cbd5e1;
+      color: #0f172a;
       padding: 12px 16px;
-      border-radius: 8px;
-      font-size: 1.2rem;
+      border-radius: 12px;
+      font-size: 1.1rem;
       outline: none;
       direction: ltr;
-      text-align: left;
+      text-align: center;
+      transition: all 0.2s ease;
     }
     .input-modal input:focus {
-      border-color: #646cff;
+      background: #ffffff;
+      border-color: #0284c7;
+      box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.15);
     }
-    .input-modal button {
-      background: #646cff;
+    .input-modal .modal-buttons {
+      display: flex;
+      gap: 10px;
+      margin-top: 4px;
+    }
+    .input-modal button.primary-btn {
+      flex: 1;
+      background: #0284c7;
       color: white;
       border: none;
       padding: 12px;
-      border-radius: 8px;
+      border-radius: 10px;
       font-size: 1rem;
-      font-weight: bold;
+      font-weight: 600;
       cursor: pointer;
+      transition: background 0.2s;
     }
-    .input-modal button:hover {
-      background: #535bf2;
+    .input-modal button.primary-btn:hover {
+      background: #0369a1;
+    }
+    .input-modal button.cancel-btn {
+      background: #f1f5f9;
+      color: #64748b;
+      border: none;
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .input-modal button.cancel-btn:hover {
+      background: #e2e8f0;
     }
 
     .start-overlay {
@@ -1509,6 +1709,14 @@ export class GdmLiveAudio extends LitElement {
     this.fetchDiagnostics();
     this.fetchSystemLogs();
 
+    // Hotkey Ctrl+Shift+D or Alt+D to toggle console without polluting the clean interface
+    window.addEventListener('keydown', (e) => {
+      if (((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'd') || (e.altKey && e.key.toLowerCase() === 'd')) {
+        e.preventDefault();
+        this.isConsoleOpen = !this.isConsoleOpen;
+      }
+    });
+
     // Start periodic dashboard updates
     setInterval(() => this.fetchDiagnostics(), 5000);
     setInterval(() => this.fetchSystemLogs(), 3000);
@@ -1858,12 +2066,13 @@ export class GdmLiveAudio extends LitElement {
       };
 
       this.session.onerror = (e) => {
-        console.error('WebSocket error:', e);
-        this.updateError('ارتباط قطع شد. لطفاً اتصال اینترنت خود را بررسی کنید.');
+        console.warn('Live WebSocket notification:', (e as any)?.message || 'connection state change');
       };
 
       this.session.onclose = (e) => {
-        this.updateStatus('Close:' + e.reason);
+        if (e.code !== 1000 && e.code !== 1005 && e.reason) {
+          this.updateStatus('اتصال پایان یافت.');
+        }
       };
 
     } catch (e) {
@@ -2380,15 +2589,64 @@ export class GdmLiveAudio extends LitElement {
 
   render() {
     return html`
-      <div style="width: 100%; height: 100%;">
+      <div class="main-page-container">
         
-        <!-- Advanced Dashboard Console Toggle Button -->
-        <button class="dashboard-toggle-btn" @click=${(e: Event) => { e.stopPropagation(); this.isConsoleOpen = !this.isConsoleOpen; }}>
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-terminal" style="margin-left: 6px;"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-          کنسول کنترل توزیع برق ایلام
-        </button>
+        <!-- Center Logo: clean white background, only logo.png centered -->
+        <div 
+          class="logo-center-wrapper ${this.isRecording ? 'recording' : ''} ${this.aiState}" 
+          @click=${this.handleOrbClick} 
+          role="button" 
+          tabindex="0"
+          title="شرکت توزیع نیروی برق استان ایلام - برای شروع یا توقف مکالمه صوتی کلیک کنید"
+        >
+          <div class="ripple-ring ring-1"></div>
+          <div class="ripple-ring ring-2"></div>
+          <img 
+            src="/logo.png" 
+            alt="لوگو شرکت توزیع نیروی برق استان ایلام" 
+            class="center-logo"
+            draggable="false"
+          />
+        </div>
 
-        <!-- Advanced Dashboard Console Glassmorphic Sidebar -->
+        <!-- Subtle speech subtitles when active/speaking -->
+        ${this.isRecording && (this.userSubtitles || this.modelSubtitles) ? html`
+          <div class="minimal-subtitles" @click=${(e: Event) => e.stopPropagation()}>
+            ${this.userSubtitles ? html`
+              <div class="sub-bubble user-bubble">
+                <span class="sub-name">شما:</span> ${this.userSubtitles}
+              </div>
+            ` : ''}
+            ${this.modelSubtitles ? html`
+              <div class="sub-bubble model-bubble">
+                <span class="sub-name">اپراتور هوشمند:</span> ${this.modelSubtitles}
+              </div>
+            ` : ''}
+          </div>
+        ` : ''}
+
+        <!-- Interactive input modal if required by assistant -->
+        ${this.requestedUI ? html`
+          <div class="input-overlay" @click=${(e: Event) => e.stopPropagation()}>
+            <div class="input-modal">
+              <label>${this.requestedUI.label}</label>
+              <input 
+                type="text" 
+                .value=${this.inputValue} 
+                @input=${(e: Event) => this.inputValue = (e.target as HTMLInputElement).value}
+                @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && this.submitUserInput(e)}
+                placeholder="شناسه قبض..."
+                autofocus
+              />
+              <div class="modal-buttons">
+                <button class="primary-btn" @click=${this.submitUserInput}>ارسال</button>
+                <button class="cancel-btn" @click=${() => this.requestedUI = null}>انصراف</button>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+
+        <!-- Advanced Dashboard Console (accessible via Ctrl+Shift+D or Alt+D) -->
         <div class="console-sidebar ${this.isConsoleOpen ? 'open' : ''}" @click=${(e: Event) => e.stopPropagation()}>
           <div class="console-header">
             <div class="console-title">
@@ -2417,124 +2675,6 @@ export class GdmLiveAudio extends LitElement {
           </div>
         </div>
 
-        <!-- Flat 2D Avatar -->
-        <gdm-human-avatar 
-          .inputNode=${this.inputNode} 
-          .outputNode=${this.outputNode} 
-          .aiState=${this.aiState}
-          @click-avatar=${this.handleOrbClick}>
-        </gdm-human-avatar>
-
-        <!-- Tap to Start floating indicator when inactive -->
-        ${!this.isRecording ? html`
-          <div class="tap-to-start-hint animate-pulse">
-            <span>برای شروع مکالمه صوتی، روی کالبد هوش مصنوعی ضربه بزنید</span>
-          </div>
-        ` : ''}
-
-        <!-- Top Header Controls -->
-        <div class="top-header-container">
-          <session-status-indicator 
-            .aiState=${this.aiState} 
-            .isRecording=${this.isRecording} 
-            .error=${this.error}>
-          </session-status-indicator>
-        </div>
-
-        <!-- System Status Indicator (Multi-model support) -->
-        <div class="status-indicator">
-          <div class="model-badge">
-            <span class="pulse-dot"></span>
-            ${this.activeModel}
-          </div>
-          <div class="task-status">
-            ${this.aiTaskStatus !== 'آماده به کار' ? html`<div class="spinner"></div>` : ''}
-            ${this.aiTaskStatus}
-          </div>
-        </div>
-
-        ${(this.error || this.status) ? html`<div id="status"> ${this.error || this.status} </div>` : ''}
-
-        <!-- Logs Panel -->
-        ${this.aiLogs.length > 0 ? html`
-          <div class="log-panel" id="logPanel">
-            ${this.aiLogs.map(log => html`
-              <div class="log-entry">
-                <span class="log-time">[${log.time}]</span>
-                <span class="log-text">${log.message}</span>
-              </div>
-            `)}
-          </div>
-        ` : ''}
-
-        <!-- Widget Overlay -->
-        ${this.widgetData ? html`
-          <div class="widget-overlay" @click=${(e: Event) => e.stopPropagation()}>
-            <div class="widget-header">
-              <span class="widget-title">${this.widgetData.title}</span>
-              <button class="widget-close" @click=${() => this.widgetData = null}>✕</button>
-            </div>
-            <div class="widget-content">
-              ${this.widgetData.widgetType === 'image' && this.widgetData.contentUrl ? html`
-                <img src="${this.widgetData.contentUrl}" class="widget-image" />
-              ` : ''}
-              ${this.widgetData.widgetType === 'audio' && this.widgetData.contentUrl ? html`
-                <div class="audio-player-wrapper">
-                  <div class="audio-visualizer-placeholder">
-                    <span>🎵 در حال پخش موسیقی</span>
-                  </div>
-                  <audio controls autoplay src="${this.widgetData.contentUrl}" style="width: 100%; border-radius: 8px; margin-top: 12px;"></audio>
-                </div>
-              ` : ''}
-              ${this.widgetData.widgetType === 'chart' || this.widgetData.widgetType === 'code' || this.widgetData.widgetType === 'text' ? 
-                this.renderWidgetTextData()
-              : ''}
-            </div>
-          </div>
-        ` : ''}
-
-        <!-- Live Subtitles/Transcription Overlay -->
-        ${this.isRecording ? html`
-          <div class="subtitles-container" @click=${(e: Event) => e.stopPropagation()}>
-            ${this.userSubtitles ? html`
-              <div class="user-subtitle">
-                <span class="sub-label">شما</span>
-                <span class="sub-text">${this.userSubtitles}</span>
-              </div>
-            ` : ''}
-            ${this.modelSubtitles ? html`
-              <div class="model-subtitle">
-                <span class="sub-label">گردآفرین</span>
-                <span class="sub-text">${this.modelSubtitles}</span>
-              </div>
-            ` : (!this.userSubtitles ? html`
-              <div class="model-subtitle placeholder-sub">
-                <span class="sub-text animate-pulse">مکالمه صوتی فعال است. لطفاً شروع به صحبت کنید...</span>
-              </div>
-            ` : '')}
-          </div>
-        ` : ''}
-        
-        ${this.requestedUI ? html`
-          <div class="input-overlay" @click=${(e: Event) => e.stopPropagation()}>
-            <div class="input-modal">
-              <label>${this.requestedUI.label}</label>
-              <input 
-                type="text" 
-                .value=${this.inputValue} 
-                @input=${(e: Event) => this.inputValue = (e.target as HTMLInputElement).value}
-                @keydown=${(e: KeyboardEvent) => e.key === 'Enter' && this.submitUserInput(e)}
-              />
-              <button @click=${this.submitUserInput}>ارسال</button>
-            </div>
-          </div>
-        ` : ''}
-        
-        <!-- Canvas-based Voice Visualizer -->
-        <audio-equalizer 
-          .inputNode=${this.inputNode} 
-          .outputNode=${this.outputNode}>
-        </audio-equalizer>
       </div>
     `;
   }
