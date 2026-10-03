@@ -2425,7 +2425,7 @@ export class GdmLiveAudio extends LitElement {
         <div class="stat-card">
           <span class="stat-card-title">موتور گفتگو</span>
           <span class="stat-card-value" style="font-size: 0.8rem;">
-            ${this.telephonyStatus?.aiMode === 'gemini-live' ? 'Gemini Live' : 'اسکریپت داخلی'}
+            ${this.telephonyStatus?.aiMode === 'local-engine' ? 'موتور داخلی (بدون سرویس خارجی)' : 'موتور داخلی'}
           </span>
         </div>
         <div class="stat-card">
@@ -2473,7 +2473,7 @@ export class GdmLiveAudio extends LitElement {
           <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7); display: flex; justify-content: space-between; margin-bottom: 4px; flex-wrap: wrap; gap: 6px;">
             <span>مخاطب: <strong>${this.activeOutboundCall.name}</strong></span>
             <span>بدهی: <strong>${this.activeOutboundCall.debt.toLocaleString()} ریال</strong></span>
-            <span style="color: #00e5ff;">${this.activeOutboundCall.transport === 'browser' ? 'تلفن مرورگری' : 'SIP/RTP'} | ${this.activeOutboundCall.aiMode === 'gemini' ? 'AI زنده' : 'اسکریپت'}</span>
+            <span style="color: #00e5ff;">${this.activeOutboundCall.transport === 'browser' ? 'تلفن مرورگری' : this.activeOutboundCall.transport === 'gsm' ? 'مودم GSM' : 'SIP/RTP'} | موتور گفتگوی داخلی</span>
           </div>
 
           <div class="outbound-dialogue-box">

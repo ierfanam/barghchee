@@ -49,7 +49,7 @@ async function startServer() {
   const transcriptsStore: any[] = [];
   const systemLogs: { time: string; level: string; message: string }[] = [
     { time: new Date().toISOString(), level: 'INFO', message: 'PBX Virtual Switch initialized successfully.' },
-    { time: new Date().toISOString(), level: 'INFO', message: 'Gemini Live API bridge ready on port 3000.' }
+    { time: new Date().toISOString(), level: 'INFO', message: 'Standalone telephony engine ready (SIP/RTP + browser phones + GSM modem, no external services).' }
   ];
 
   // In-memory subscribers database cache

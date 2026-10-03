@@ -141,7 +141,7 @@
     <div class="log" id="log"></div>
 
     <div class="hint">
-      این تلفن رایگان است و هیچ سرویس پولی خارجی نیاز ندارد. صدا از طریق میکروفون و بلندگوی مرورگر شما به صورت زنده رد و بدل می‌شود.
+      این تلفن کاملاً رایگان است و به هیچ سرویس خارجی یا پولی نیاز ندارد. گفتگو از طریق کلیدهای دکمه‌ای (DTMF) انجام می‌شود و پاسخ اپراتور با بلندگوی مرورگر پخش می‌شود. اگر میکروفون را مجاز کنید، صحبت نیز امکان‌پذیر است.
     </div>
   </div>
 
@@ -162,6 +162,7 @@
     let audioCtx = null;
     let micStream = null;
     let processor = null;
+    let micAvailable = false;
     let speakQueue = [];
     let speaking = false;
 
@@ -239,19 +240,37 @@
     }
 
     async function ensureAudio() {
-      if (audioCtx) return;
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-      const source = audioCtx.createMediaStreamSource(micStream);
-      processor = audioCtx.createScriptProcessor(4096, 1, 1);
-      source.connect(processor);
-      processor.connect(audioCtx.destination);
-      processor.onaudioprocess = (e) => {
-        if (!activeCallId) return;
-        const input = e.inputBuffer.getChannelData(0);
-        const pcm16 = floatTo16(resample(input, audioCtx.sampleRate, 16000));
-        send({ type: 'audio', callId: activeCallId, pcm: int16ToBase64(pcm16) });
-      };
+      if (audioCtx || micStream !== null) return;
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      } catch (e) {
+        audioCtx = null;
+      }
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        if (audioCtx) {
+          const source = audioCtx.createMediaStreamSource(micStream);
+          processor = audioCtx.createScriptProcessor(4096, 1, 1);
+          source.connect(processor);
+          processor.connect(audioCtx.destination);
+          processor.onaudioprocess = (e) => {
+            if (!activeCallId) return;
+            const input = e.inputBuffer.getChannelData(0);
+            const pcm16 = floatTo16(resample(input, audioCtx.sampleRate, 16000));
+            send({ type: 'audio', callId: activeCallId, pcm: int16ToBase64(pcm16) });
+          };
+        }
+        micAvailable = true;
+        log('میکروفون فعال شد');
+      } catch (e) {
+        micStream = null;
+        processor = null;
+        micAvailable = false;
+        log('میکروفون در دسترس نیست - حالت کلید دار (DTMF)');
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        try { await audioCtx.resume(); } catch (e) {}
+      }
     }
 
     function floatTo16(float32) {
@@ -356,18 +375,13 @@
     }
 
     acceptBtn.onclick = async () => {
-      try {
-        await ensureAudio();
-        if (audioCtx.state === 'suspended') await audioCtx.resume();
-        send({ type: 'accept', callId: activeCallId });
-        incomingEl.classList.remove('show');
-        hangupBtn.disabled = false;
-        operatorBtn.disabled = true;
-        setStatus('در حال گفتگو...', 'connected');
-        log('تماس پاسخ داده شد');
-      } catch (e) {
-        setStatus('دسترسی به میکروفون داده نشد', 'error');
-      }
+      await ensureAudio();
+      send({ type: 'accept', callId: activeCallId });
+      incomingEl.classList.remove('show');
+      hangupBtn.disabled = false;
+      operatorBtn.disabled = true;
+      setStatus(micAvailable ? 'در حال گفتگو...' : 'در حال گفتگو (حالت کلید دار)...', 'connected');
+      log('تماس پاسخ داده شد');
     };
 
     declineBtn.onclick = () => {
@@ -376,15 +390,10 @@
     };
 
     operatorBtn.onclick = async () => {
-      try {
-        await ensureAudio();
-        if (audioCtx.state === 'suspended') await audioCtx.resume();
-        send({ type: 'callOperator' });
-        setStatus('در حال شماره‌گیری اپراتور...', 'ringing');
-        log('درخواست تماس با اپراتور هوشمند');
-      } catch (e) {
-        setStatus('دسترسی به میکروفون داده نشد', 'error');
-      }
+      await ensureAudio();
+      send({ type: 'callOperator' });
+      setStatus('در حال شماره‌گیری اپراتور...', 'ringing');
+      log('درخواست تماس با اپراتور هوشمند');
     };
 
     hangupBtn.onclick = () => {
