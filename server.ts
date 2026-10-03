@@ -7,7 +7,7 @@ import dotenv from "dotenv";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import { GoogleGenAI } from "@google/genai";
-import { sipGateway } from "./server/sipGateway";
+import { TelephonyService, TelephonySubscriber } from "./server/telephony";
 
 import { createRequire } from "module";
 const nodeRequire = typeof __filename !== 'undefined' ? createRequire(__filename) : createRequire(import.meta.url);
@@ -35,13 +35,12 @@ function safeSend(ws: any, data: any) {
   }
 }
 
-// Initialize real-world SIP Gateway (UDP 5060) & Kamailio integration
-sipGateway.startUdpServer(5060);
-sipGateway.syncWithKamailio();
+// Initialize standalone telephony engine (real SIP/RTP on UDP 5060 + browser phones)
+// The legacy simulated SIP gateway has been retired in favor of the real engine.
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
   
   app.use(express.json());
   app.use(cors());
@@ -71,6 +70,77 @@ async function startServer() {
       s.region.toLowerCase().includes(q)
     );
     res.json({ subscribers: filtered });
+  });
+
+  const lookupSubscriber = (phone: string): TelephonySubscriber | null => {
+    const normalized = String(phone || '').replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d))).trim();
+    const found = subscribersCache.find((s) =>
+      String(s.phone).replace(/\s/g, '') === normalized ||
+      String(s.phone).replace(/\s/g, '') === String(phone || '').trim()
+    );
+    if (found) {
+      return {
+        id: found.id,
+        name: found.name,
+        phone: found.phone,
+        debt: Number(found.debt) || 0,
+        region: found.region,
+        billId: found.billId,
+        lastPayment: found.lastPayment,
+        averageConsumption: found.averageConsumption,
+      };
+    }
+    return null;
+  };
+
+  const telephony = new TelephonyService(lookupSubscriber, 5060);
+
+  app.get("/api/telephony/status", (req, res) => {
+    res.json(telephony.getStatus());
+  });
+
+  app.get("/api/telephony/calls", (req, res) => {
+    res.json({ calls: telephony.getHistory() });
+  });
+
+  app.get("/api/telephony/calls/:id", (req, res) => {
+    const record = telephony.getCall(req.params.id);
+    if (!record) return res.status(404).json({ error: "call_not_found" });
+    res.json(record);
+  });
+
+  app.post("/api/telephony/calls", async (req, res) => {
+    const { subscriber, name, phone, debt, region, billId, transport, phoneId } = req.body;
+    const sub: TelephonySubscriber = subscriber || {
+      name: name || 'مشترک',
+      phone: String(phone || ''),
+      debt: Number(debt) || 0,
+      region,
+      billId,
+    };
+    if (!sub.phone) return res.status(400).json({ error: "phone_required" });
+    try {
+      const record = await telephony.startOutboundCall(sub, { transport: transport || 'sip', phoneId });
+      systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Outbound AI call initiated to ${sub.phone} (${sub.name}) via standalone telephony.` });
+      res.json({ success: true, call: record });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
+
+  app.post("/api/telephony/calls/:id/speak", async (req, res) => {
+    const ok = await telephony.speakToCall(req.params.id, String(req.body.text || ''));
+    res.json({ success: ok });
+  });
+
+  app.post("/api/telephony/calls/:id/dtmf", async (req, res) => {
+    const ok = await telephony.sendDtmf(req.params.id, String(req.body.digit || ''));
+    res.json({ success: ok });
+  });
+
+  app.post("/api/telephony/calls/:id/hangup", async (req, res) => {
+    const ok = await telephony.hangupCall(req.params.id);
+    res.json({ success: ok });
   });
 
   app.post("/api/subscribers", (req, res) => {
@@ -139,28 +209,40 @@ async function startServer() {
 
   app.post("/api/make-call", async (req, res) => {
     const { number, name, debt } = req.body;
-    
-    console.log(`[SIP/KAMAILIO] Initiating real-world SIP call stream to: ${number} (${name || 'مشترک'})`);
-    
-    const sipResult = await sipGateway.initiateOutboundSipCall(number || '09180000000', name || 'مشترک', Number(debt) || 0);
-    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Outbound SIP call initiated to ${number} via Kamailio Trunk.` });
 
-    res.json({ 
-        success: true, 
-        callSid: sipResult.callId,
-        status: "routing_via_kamailio_sip_trunk",
-        sipDetails: sipResult
-    });
+    console.log(`[TELEPHONY] Initiating standalone SIP call to: ${number} (${name || 'مشترک'})`);
+
+    try {
+      const record = await telephony.startOutboundCall({
+        name: name || 'مشترک',
+        phone: String(number || '09180000000'),
+        debt: Number(debt) || 0,
+      });
+      systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Outbound SIP call initiated to ${number} via standalone telephony engine.` });
+
+      res.json({
+        success: true,
+        callSid: record.id,
+        status: "routing_via_standalone_sip_engine",
+        sipDetails: { callId: record.id, state: record.state, transport: record.transport }
+      });
+    } catch (e: any) {
+      systemLogs.push({ time: new Date().toISOString(), level: 'WARN', message: `Outbound call to ${number} failed: ${e.message}` });
+      res.json({
+        success: false,
+        error: e.message,
+        hint: 'برای تماس با شماره‌های واقعی، ترانک SIP را در SIP_PROXY_HOST تنظیم کنید یا از تلفن مرورگری /phone.html استفاده کنید.'
+      });
+    }
   });
 
   app.get("/api/sip/status", (req, res) => {
-    res.json(sipGateway.getStatus());
+    res.json(telephony.getStatus());
   });
 
   app.post("/api/sip/sync", async (req, res) => {
-    const success = await sipGateway.syncWithKamailio();
-    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: 'Manual Kamailio SIP synchronization triggered.' });
-    res.json({ success, status: 'kamailio_synchronized' });
+    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: 'SIP registration refresh triggered on standalone telephony engine.' });
+    res.json({ success: true, status: 'standalone_sip_engine', sip: telephony.sipStatus });
   });
 
   // Catch-all for API endpoints to return JSON 404 instead of HTML fallback
@@ -185,6 +267,10 @@ async function startServer() {
 
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
+  });
+
+  server.on('error', (err: any) => {
+    console.error(`[SERVER] Failed to bind port ${PORT}:`, err?.message || err);
   });
 
   // Initialize Internal Cloud VoIP Virtual Server (Signaling)
@@ -259,6 +345,8 @@ async function startServer() {
         liveWss.handleUpgrade(request, socket, head, (ws) => {
           liveWss.emit('connection', ws, request);
         });
+      } else if (pathname === '/telephony') {
+        telephony.handleUpgrade(request, socket, head);
       } else {
         try { socket.destroy(); } catch (err) {}
       }
@@ -339,7 +427,7 @@ async function startServer() {
       const personaInstruction = ' تو یک دستیار صوتی زن جوان، بانشاط، صمیمی و دوستانه-رسمی هستی. لحن پاسخگویی تو باید بسیار لطیف، شیوا، زنانه و کاملا انسان‌گونه باشد.';
       const generalAssistantInstruction = ' علاوه بر امور برق ایلام، تو یک دستیار فوق‌هوشمند همه‌کاره هستی. اگر کاربر موسیقی (پخش آهنگ)، تولید تصویر، تولید کد، نمایش نمودار، ویدئو یا هر چیز بصری/شنیداری درخواست کرد، باید از ابزار displayWidget استفاده کنی. برای آهنگ آدرس یک فایل صوتی در اینترنت را پیدا کن یا به عنوان نمونه از یک لینک معتبر استفاده کن و widgetType را "audio" قرار بده. برای کدنویسی widgetType را "code" بگذار.';
       const fetchInstruction = ' خیلی مهم و حیاتی: تو هرگز نباید از پر کردن فرم‌ها یا ورود به سایت‌ها سر باز بزنی! تو کاملا توانایی داری وارد سایت‌های bargheman.com یا eserv.bargh-ilam.ir بشی. برای این کار فقط کافیه ابزار `fillAndSubmitBillForm` یا `executeNodeCode` را فراخوانی کنی تا اطلاعات شناسه قبض را به سایت ارسال کرده و نتیجه را بگیری. هیچ وقت نگو "من نمیتوانم وارد سایت شوم" یا "دسترسی ندارم". مستقیما و بدون بهانه‌گیری ابزار مربوطه را برای پر کردن فرم و لاگین فراخوانی کن.';
-      const phoneCallInstruction = ' برای برقراری تماس تلفنی واقعی اینترنتی به شماره های واقعی (PSTN)، از ابزار initiateLivePhoneCall استفاده کن. اگر ابزار خطا داد که کلیدهای Twilio تنظیم نشده اند، با لحن دوستانه به کاربر بگو که تماس های شبکه مخابراتی نیازمند تنظیمات API رایگان یا پولی Twilio هستند و از آنها بخواه کلیدهایشان را تنظیم کنند.';
+      const phoneCallInstruction = ' برای برقراری تماس تلفنی واقعی به شماره های موبایل مشترکین، از ابزار initiateLivePhoneCall استفاده کن. این ابزار از سرویس تلفن مستقل و رایگان سازمان (SIP/RTP) استفاده می‌کند و نیازی به هیچ سرویس پولی خارجی ندارد. اگر شماره در شبکه داخلی یا ترانک SIP تنظیم نشده بود، با لحن دوستانه به کاربر بگو که برای تماس با شماره‌های خارجی، می‌تواند یک ترانک SIP رایگان یا سازمانی در تنظیمات سرور (SIP_PROXY_HOST) وارد کند یا از تلفن مرورگری در آدرس /phone.html استفاده کند.';
 
       const config = {
         model: 'gemini-3.1-flash-live-preview',
@@ -705,27 +793,30 @@ async function startServer() {
                     }
                     break;
                   case 'initiateLivePhoneCall':
-                    safeSend(clientWs, { statusUpdate: 'در حال برقراری تماس صوتی اینترنتی...' });
+                    safeSend(clientWs, { statusUpdate: 'در حال برقراری تماس تلفنی واقعی با سرویس تلفن مستقل...' });
                     try {
-                      console.log('Initiating Twilio phone call to:', call.args?.targetNumber);
-                      const accountSid = process.env.TWILIO_ACCOUNT_SID;
-                      const authToken = process.env.TWILIO_AUTH_TOKEN;
-                      const fromNumber = process.env.TWILIO_PHONE_NUMBER;
-                      
-                      if (!accountSid || !authToken || !fromNumber) {
-                        responseData = { error: 'Twilio API keys are missing. Inform the user they must provide TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_PHONE_NUMBER in settings.' };
-                      } else {
-                        const twilioClient = nodeRequire('twilio')(accountSid, authToken);
-                        const twilioCall = await twilioClient.calls.create({
-                            twiml: `<Response><Say language="fa-IR">این تماس از طرف دستیار هوشمند شما برقرار شده است.</Say></Response>`,
-                            to: call.args?.targetNumber,
-                            from: fromNumber
-                        });
-                        responseData = { status: 'success', callSid: twilioCall.sid, message: 'Call initiated successfully.' };
-                      }
+                      console.log('Initiating standalone telephony call to:', call.args?.targetNumber);
+                      const targetNumber = String(call.args?.targetNumber || '');
+                      const knownSub = lookupSubscriber(targetNumber);
+                      const sub: TelephonySubscriber = knownSub || {
+                        name: 'مشترک',
+                        phone: targetNumber,
+                        debt: 0,
+                      };
+                      const record = await telephony.startOutboundCall(sub, { transport: 'sip' });
+                      responseData = {
+                        status: 'success',
+                        callId: record.id,
+                        transport: 'standalone-sip',
+                        message: `تماس با شماره ${targetNumber} از طریق سرویس تلفن مستقل (SIP/RTP) برقرار شد.`,
+                        call: record
+                      };
                     } catch (e: any) {
-                      console.error('Phone call failed:', e);
-                      responseData = { error: 'Phone call failed: ' + e.message };
+                      responseData = {
+                        status: 'failed',
+                        error: e.message,
+                        hint: 'برای تماس با شماره‌های واقعی، یک ترانک SIP (رایگان یا سازمانی) در تنظیمات SIP_PROXY_HOST وارد کنید یا از تلفن مرورگری در /phone.html استفاده کنید.'
+                      };
                     }
                     break;
                   case 'executeNodeCode':
