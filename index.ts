@@ -41,7 +41,7 @@ export class GdmLiveAudio extends LitElement {
   @state() showNewSubModal = false;
   @state() webAgentLogs: {time: string, msg: string}[] = [];
   @state() isWebAgentRunning = false;
-  @state() activeOutboundCall: { name: string, phone: string, debt: number, status: string, conversation: { sender: string, text: string }[] } | null = null;
+  @state() activeOutboundCall: { callId: string, name: string, phone: string, debt: number, status: string, state: string, transport: string, aiMode: string, conversation: { sender: string, text: string }[] } | null = null;
   @state() customToneStrategy: string = 'friendly';
   @state() empathyLevel: number = 75;
   @state() persistenceLevel: number = 80;
@@ -51,6 +51,10 @@ export class GdmLiveAudio extends LitElement {
   @state() isCampaignRunning = false;
   @state() campaignStatus = '';
   @state() isConsoleOpen = false;
+  @state() telephonyStatus: any = null;
+  @state() callHistory: any[] = [];
+
+  private telephonyWs: WebSocket | null = null;
 
   private session: WebSocket | null = null;
   private inputAudioContext = new (window.AudioContext ||
@@ -1708,6 +1712,8 @@ export class GdmLiveAudio extends LitElement {
     this.fetchSubscribers();
     this.fetchDiagnostics();
     this.fetchSystemLogs();
+    this.initTelephony();
+    this.fetchTelephonyStatus();
 
     // Hotkey Ctrl+Shift+D or Alt+D to toggle console without polluting the clean interface
     window.addEventListener('keydown', (e) => {
@@ -1846,85 +1852,155 @@ export class GdmLiveAudio extends LitElement {
     }, 2000);
   }
 
-  private startOutboundCallSimulation(sub: any) {
-    this.activeOutboundCall = {
-      name: sub.name,
-      phone: sub.phone,
-      debt: sub.debt,
-      status: 'در حال برقراری تماس...',
-      conversation: []
-    };
-    this.aiState = 'listening';
-
-    const dialogue = [
-      { sender: 'system', text: `تماس برقرار شد با شماره ${sub.phone}` },
-      { sender: 'ai', text: `سلام جناب ${sub.name} عزیز، وقتتون بخیر. از شرکت توزیع نیروی برق استان ایلام تماس می‌گیرم.` },
-      { sender: 'user', text: `سلام، بله بفرمایید. قبض برق موردی داره؟` },
-      { sender: 'ai', text: `راستش بررسی سیستم نشان میده قبض انشعاب شما به مبلغ ${sub.debt.toLocaleString()} ریال معوقه داره و متاسفانه مهلت پرداختش هم گذشته. خواستم خواهش کنم امروز نسبت به تسویه‌ش اقدام فرمایید.` },
-      { sender: 'user', text: `من واقعاً الان دستم خالیه، حقوقم رو هفته آینده می‌ریزند، نمیشه صبر کنید؟` },
-      { sender: 'ai', text: `شرایطتون رو کاملاً درک می‌کنم. برای رفاه حال شما من می‌تونم درخواست 'قسط‌بندی ۲ مرحله‌ای' براتون ثبت کنم تا از قطع خودکار انشعاب جلوگیری بشه. موافقید؟` },
-      { sender: 'user', text: `بله خیلی ممنون میشم اگر قسطی کنید که بتونم پرداخت کنم.` },
-      { sender: 'ai', text: `بسیار عالی، درخواست قسط‌بندی شما با موفقیت ثبت شد و پیامک تایید آن هم برای شما ارسال گردید. مهلت پرداخت اولین قسط تا ۱۰ روز دیگر است.` },
-      { sender: 'system', text: 'مکالمه پایان یافت. توافق قسط‌بندی ثبت گردید.' }
-    ];
-
-    let step = 0;
-    const playDialogueStep = () => {
-      if (!this.activeOutboundCall) return;
-      if (step < dialogue.length) {
-        const line = dialogue[step];
-        this.activeOutboundCall = {
-          ...this.activeOutboundCall,
-          status: line.sender === 'system' ? line.text : 'در حال گفتگو...',
-          conversation: [...this.activeOutboundCall.conversation, line]
-        };
-
-        if (line.sender === 'ai') {
-          this.aiState = 'speaking';
-          this.modelSubtitles = line.text;
-          this.userSubtitles = '';
-        } else if (line.sender === 'user') {
-          this.aiState = 'listening';
-          this.userSubtitles = line.text;
-          this.modelSubtitles = '';
-        } else {
-          this.aiState = 'idle';
-        }
-
-        step++;
-        this.requestUpdate();
-        setTimeout(playDialogueStep, line.sender === 'system' ? 2500 : 4500);
-      } else {
-        this.aiState = 'idle';
-        this.userSubtitles = '';
-        this.modelSubtitles = '';
-        
-        // update status locally
-        const index = this.subscribersList.findIndex(s => s.phone === sub.phone);
-        if (index !== -1) {
-          this.subscribersList[index].status = 'توافق پرداخت ثبت شد';
-          this.subscribersList = [...this.subscribersList];
-        }
+  private async fetchTelephonyStatus() {
+    try {
+      const res = await fetch('/api/telephony/status');
+      if (!res.ok) return;
+      const ct = res.headers.get('content-type');
+      if (ct && ct.includes('application/json')) {
+        this.telephonyStatus = await res.json();
       }
-    };
-
-    setTimeout(playDialogueStep, 1500);
+    } catch (e) {}
   }
 
-  private submitHumanTakeoverMessage() {
+  private initTelephony() {
+    if (this.telephonyWs) return;
+    try {
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      this.telephonyWs = new WebSocket(`${wsProtocol}//${window.location.host}/telephony`);
+      this.telephonyWs.onopen = () => {
+        this.telephonyWs?.send(JSON.stringify({ type: 'hello', role: 'console' }));
+      };
+      this.telephonyWs.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'callEvent' && this.activeOutboundCall?.callId === msg.callId) {
+            if (msg.event === 'connected') {
+              this.activeOutboundCall = { ...this.activeOutboundCall, state: 'connected', status: 'در حال گفتگوی زنده' };
+            } else if (msg.event === 'ringing') {
+              this.activeOutboundCall = { ...this.activeOutboundCall, state: 'ringing', status: 'در حال زنگ زدن...' };
+            } else if (msg.event === 'ended') {
+              this.activeOutboundCall = {
+                ...this.activeOutboundCall,
+                state: 'ended',
+                status: `تماس پایان یافت (${msg.outcome || 'completed'})`,
+              };
+              setTimeout(() => {
+                if (this.activeOutboundCall?.state === 'ended') this.activeOutboundCall = null;
+              }, 15000);
+            }
+          }
+          if (msg.type === 'transcript' && this.activeOutboundCall?.callId === msg.callId) {
+            const sender = msg.speaker === 'ai' ? 'ai' : msg.speaker === 'caller' ? 'user' : msg.speaker === 'dtmf' ? 'system' : 'operator';
+            this.activeOutboundCall = {
+              ...this.activeOutboundCall,
+              conversation: [...this.activeOutboundCall.conversation, { sender, text: msg.text }],
+            };
+          }
+          if (msg.type === 'callEvent' && msg.event === 'ended') {
+            this.fetchTelephonyStatus();
+          }
+        } catch (e) {}
+      };
+      this.telephonyWs.onerror = () => {};
+      this.telephonyWs.onclose = () => {
+        this.telephonyWs = null;
+        setTimeout(() => this.initTelephony(), 5000);
+      };
+    } catch (e) {}
+  }
+
+  private async startOutboundCall(sub: any) {
+    if (this.activeOutboundCall && this.activeOutboundCall.state !== 'ended') return;
+    try {
+      const res = await fetch('/api/telephony/calls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          subscriber: {
+            id: sub.id,
+            name: sub.name,
+            phone: sub.phone,
+            debt: Number(sub.debt) || 0,
+            region: sub.region,
+            billId: sub.billId,
+            lastPayment: sub.lastPayment,
+          },
+          transport: 'sip',
+        }),
+      });
+      const ct = res.headers.get('content-type');
+      if (!res.ok || !(ct && ct.includes('application/json'))) {
+        this.activeOutboundCall = {
+          callId: `local-${Date.now()}`,
+          name: sub.name,
+          phone: sub.phone,
+          debt: Number(sub.debt) || 0,
+          state: 'ended',
+          status: 'خطا در برقراری تماس',
+          transport: 'sip',
+          aiMode: 'unknown',
+          conversation: [{ sender: 'system', text: `برقراری تماس با ${sub.phone} ممکن نبود. ترانک SIP یا تلفن مقصد در دسترس نیست.` }],
+        };
+        return;
+      }
+      const data = await res.json();
+      const call = data.call;
+      this.activeOutboundCall = {
+        callId: call.id,
+        name: sub.name,
+        phone: sub.phone,
+        debt: Number(sub.debt) || 0,
+        state: call.state,
+        status: call.state === 'dialing' ? 'در حال شماره‌گیری...' : 'در حال برقراری تماس...',
+        transport: call.transport,
+        aiMode: call.aiMode,
+        conversation: [{ sender: 'system', text: `تماس با شماره ${sub.phone} آغاز شد. اپراتور هوشمند در حال اتصال است.` }],
+      };
+      this.fetchTelephonyStatus();
+    } catch (e) {
+      console.error('Outbound call error:', e);
+    }
+  }
+
+  private async hangupActiveCall() {
+    if (!this.activeOutboundCall) return;
+    try {
+      await fetch(`/api/telephony/calls/${this.activeOutboundCall.callId}/hangup`, { method: 'POST' });
+    } catch (e) {}
+    this.activeOutboundCall = { ...this.activeOutboundCall, state: 'ended', status: 'تماس پایان یافت' };
+    setTimeout(() => { this.activeOutboundCall = null; }, 3000);
+  }
+
+  private async sendDtmfToCall(digit: string) {
+    if (!this.activeOutboundCall) return;
+    try {
+      await fetch(`/api/telephony/calls/${this.activeOutboundCall.callId}/dtmf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ digit }),
+      });
+    } catch (e) {}
+  }
+
+  private async submitHumanTakeoverMessage() {
     if (!this.humanTextResponse.trim() || !this.activeOutboundCall) return;
-    const userMsg = { sender: 'operator', text: `[تداخل دستی اپراتور]: ${this.humanTextResponse}` };
-    const aiResponse = { sender: 'ai', text: `دستور اپراتور اعمال شد. شرایط ویژه پرداخت با تایید دستی سوپروایزر ثبت شد.` };
-    
+    const text = this.humanTextResponse.trim();
+    const userMsg = { sender: 'operator', text: `[اپراتور انسانی]: ${text}` };
     this.activeOutboundCall = {
       ...this.activeOutboundCall,
-      conversation: [...this.activeOutboundCall.conversation, userMsg, aiResponse]
+      conversation: [...this.activeOutboundCall.conversation, userMsg]
     };
-    this.aiState = 'speaking';
-    this.modelSubtitles = aiResponse.text;
     this.humanTextResponse = '';
     this.isHumanTakeoverActive = false;
     this.requestUpdate();
+    try {
+      await fetch(`/api/telephony/calls/${this.activeOutboundCall.callId}/speak`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+    } catch (e) {}
   }
 
   private initAudio() {
@@ -2335,16 +2411,22 @@ export class GdmLiveAudio extends LitElement {
       <!-- Diagnostics / Stats -->
       <div class="stats-grid">
         <div class="stat-card">
-          <span class="stat-card-title">وضعیت SIP Trunk</span>
-          <span class="stat-card-value" style="color: #10b981;">فعال (ONLINE)</span>
+          <span class="stat-card-title">سرویس تلفن مستقل</span>
+          <span class="stat-card-value" style="color: #10b981; font-size: 0.85rem;">
+            ${this.telephonyStatus?.activeCallCount > 0 ? `${this.telephonyStatus.activeCallCount} تماس فعال` : 'آنلاین (رایگان)'}
+          </span>
         </div>
         <div class="stat-card">
-          <span class="stat-card-title">کانال‌های VoIP فعال</span>
-          <span class="stat-card-value">${this.activeOutboundCall ? '1 / 1000' : '0 / 1000'}</span>
+          <span class="stat-card-title">ترانک SIP</span>
+          <span class="stat-card-value" style="font-size: 0.8rem;">
+            ${this.telephonyStatus?.sip?.proxy ? this.telephonyStatus.sip.proxy : 'LAN / مرورگری'}
+          </span>
         </div>
         <div class="stat-card">
-          <span class="stat-card-title">نرخ موفقیت هوش مصنوعی</span>
-          <span class="stat-card-value" style="color: #00e5ff;">۹۴.۲٪</span>
+          <span class="stat-card-title">موتور گفتگو</span>
+          <span class="stat-card-value" style="font-size: 0.8rem;">
+            ${this.telephonyStatus?.aiMode === 'local-engine' ? 'موتور داخلی (بدون سرویس خارجی)' : 'موتور داخلی'}
+          </span>
         </div>
         <div class="stat-card">
           <span class="stat-card-title">مدل صوتی فعال</span>
@@ -2383,14 +2465,15 @@ export class GdmLiveAudio extends LitElement {
       <!-- Outbound Call & Human Takeover Widget -->
       <div class="outbound-simulator">
         <div class="outbound-header">
-          <span>شبیه‌ساز تماس خروجی و مداخله انسانی</span>
+          <span>تماس خروجی زنده و مداخله انسانی</span>
           <span class="outbound-status">${this.activeOutboundCall ? this.activeOutboundCall.status : 'بدون تماس فعال'}</span>
         </div>
 
         ${this.activeOutboundCall ? html`
-          <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7); display: flex; justify-content: space-between; margin-bottom: 4px;">
+          <div style="font-size: 0.8rem; color: rgba(255,255,255,0.7); display: flex; justify-content: space-between; margin-bottom: 4px; flex-wrap: wrap; gap: 6px;">
             <span>مخاطب: <strong>${this.activeOutboundCall.name}</strong></span>
             <span>بدهی: <strong>${this.activeOutboundCall.debt.toLocaleString()} ریال</strong></span>
+            <span style="color: #00e5ff;">${this.activeOutboundCall.transport === 'browser' ? 'تلفن مرورگری' : this.activeOutboundCall.transport === 'gsm' ? 'مودم GSM' : 'SIP/RTP'} | موتور گفتگوی داخلی</span>
           </div>
 
           <div class="outbound-dialogue-box">
@@ -2401,14 +2484,25 @@ export class GdmLiveAudio extends LitElement {
             `)}
           </div>
 
+          <!-- DTMF Pad -->
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px;">
+            ${['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'].map(key => html`
+              <button class="sub-action-btn" style="padding: 6px 0; font-size: 0.8rem;" @click=${() => this.sendDtmfToCall(key)}>${key}</button>
+            `)}
+          </div>
+
           <!-- Quick Actions / Takeover Controls -->
           <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
             <label style="font-size: 0.75rem; color: rgba(255,255,255,0.6); display: flex; align-items: center; gap: 6px; cursor: pointer;">
               <input type="checkbox" .checked=${this.isHumanTakeoverActive} @change=${(e: any) => this.isHumanTakeoverActive = e.target.checked} style="accent-color: #00e5ff;" />
               فعالسازی مداخله دستی اپراتور (Human Takeover)
             </label>
-            ${this.isHumanTakeoverActive ? html`<span style="font-size: 0.7rem; color: #ff4a4a; animation: pulse 1s infinite;">● کنترل مکالمه در اختیار شماست</span>` : ''}
+            <button class="sub-action-btn" style="background: rgba(255,74,74,0.2); border-color: rgba(255,74,74,0.5); color: #ff4a4a;" @click=${this.hangupActiveCall}>
+              قطع تماس
+            </button>
           </div>
+
+          ${this.isHumanTakeoverActive ? html`<span style="font-size: 0.7rem; color: #ff4a4a; animation: pulse 1s infinite;">● کنترل مکالمه در اختیار شماست</span>` : ''}
 
           ${this.isHumanTakeoverActive ? html`
             <div class="takeover-form">
@@ -2425,7 +2519,7 @@ export class GdmLiveAudio extends LitElement {
           ` : ''}
         ` : html`
           <div style="padding: 24px 0; text-align: center; color: rgba(255,255,255,0.4); font-size: 0.8rem;">
-            برای آزمایش گفتگوی صوتی و مکانیزم مداخله دستی، از تب پایگاه مشترکین یک تماس برقرار کنید.
+            برای برقراری تماس واقعی با اپراتور هوشمند، از تب پایگاه مشترکین دکمه «برقراری تماس» را بزنید.
           </div>
         `}
       </div>
@@ -2480,7 +2574,7 @@ export class GdmLiveAudio extends LitElement {
               <span style="font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; background: ${sub.status === 'معوقه' ? 'rgba(255,74,74,0.1)' : 'rgba(16,185,129,0.1)'}; color: ${sub.status === 'معوقه' ? '#ff4a4a' : '#10b981'};">
                 ${sub.status}
               </span>
-              <button class="sub-action-btn" @click=${() => this.startOutboundCallSimulation(sub)}>
+              <button class="sub-action-btn" @click=${() => this.startOutboundCall(sub)}>
                 برقراری تماس
               </button>
             </div>

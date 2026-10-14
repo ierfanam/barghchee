@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>تلفن هوشمند - شرکت توزیع نیروی برق استان ایلام</title>
+  <link rel="icon" type="image/png" href="/logo.png" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Vazirmatn', Tahoma, Arial, sans-serif;
+      background: linear-gradient(160deg, #0b1526 0%, #12233d 60%, #0b1526 100%);
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .phone {
+      width: 100%;
+      max-width: 420px;
+      background: rgba(8, 18, 34, 0.9);
+      border: 1px solid rgba(0, 229, 255, 0.25);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5), 0 0 30px rgba(0, 229, 255, 0.08);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand img { width: 48px; height: 48px; border-radius: 50%; }
+    .brand h1 { font-size: 1.05rem; color: #00e5ff; }
+    .brand p { font-size: 0.72rem; color: rgba(255,255,255,0.5); }
+    .status {
+      text-align: center;
+      padding: 10px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      font-size: 0.85rem;
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .status.connected { color: #10b981; border-color: rgba(16,185,129,0.4); }
+    .status.ringing { color: #f59e0b; border-color: rgba(245,158,11,0.4); animation: pulse 1s infinite; }
+    .status.error { color: #ff4a4a; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .actions { display: flex; gap: 10px; }
+    .btn {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: 14px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.15s, filter 0.15s;
+    }
+    .btn:hover { transform: translateY(-1px); filter: brightness(1.1); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+    .btn-call { background: #10b981; color: #04120c; }
+    .btn-decline { background: #ef4444; color: #fff; }
+    .btn-hangup { background: #ef4444; color: #fff; }
+    .btn-operator { background: #00e5ff; color: #04222b; }
+    .incoming {
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px;
+      border-radius: 14px;
+      background: rgba(245, 158, 11, 0.08);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+    }
+    .incoming.show { display: flex; }
+    .incoming .caller { font-size: 0.9rem; }
+    .incoming .caller strong { color: #00e5ff; }
+    .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .key {
+      padding: 14px 0;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      color: #fff;
+      font-size: 1.15rem;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .key:active { background: rgba(0, 229, 255, 0.25); }
+    .log {
+      max-height: 140px;
+      overflow-y: auto;
+      font-size: 0.72rem;
+      color: rgba(255,255,255,0.55);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 10px;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,0.05);
+    }
+    .log div { display: flex; gap: 8px; }
+    .log time { color: #00e5ff; font-family: monospace; white-space: nowrap; }
+    .hint { font-size: 0.7rem; color: rgba(255,255,255,0.4); text-align: center; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <div class="phone">
+    <div class="brand">
+      <img src="/logo.png" alt="لوگو" />
+      <div>
+        <h1>تلفن هوشمند گُردآفرین</h1>
+        <p>شرکت توزیع نیروی برق استان ایلام - سرویس تلفن رایگان</p>
+      </div>
+    </div>
+
+    <div class="status" id="status">در حال اتصال به سرور تلفن...</div>
+
+    <div class="incoming" id="incoming">
+      <div class="caller">تماس ورودی از: <strong id="callerName">ناشناس</strong></div>
+      <div class="actions">
+        <button class="btn btn-call" id="acceptBtn">پاسخ</button>
+        <button class="btn btn-decline" id="declineBtn">رد کردن</button>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn btn-operator" id="operatorBtn">تماس با اپراتور هوشمند</button>
+    </div>
+
+    <button class="btn btn-hangup" id="hangupBtn" disabled>قطع تماس</button>
+
+    <div class="keypad" id="keypad"></div>
+
+    <div class="log" id="log"></div>
+
+    <div class="hint">
+      این تلفن کاملاً رایگان است و به هیچ سرویس خارجی یا پولی نیاز ندارد. گفتگو از طریق کلیدهای دکمه‌ای (DTMF) انجام می‌شود و پاسخ اپراتور با بلندگوی مرورگر پخش می‌شود. اگر میکروفون را مجاز کنید، صحبت نیز امکان‌پذیر است.
+    </div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const incomingEl = document.getElementById('incoming');
+    const callerNameEl = document.getElementById('callerName');
+    const acceptBtn = document.getElementById('acceptBtn');
+    const declineBtn = document.getElementById('declineBtn');
+    const operatorBtn = document.getElementById('operatorBtn');
+    const hangupBtn = document.getElementById('hangupBtn');
+    const keypadEl = document.getElementById('keypad');
+    const logEl = document.getElementById('log');
+
+    let ws = null;
+    let phoneId = 'phone-' + Math.random().toString(36).slice(2, 6);
+    let activeCallId = null;
+    let audioCtx = null;
+    let micStream = null;
+    let processor = null;
+    let micAvailable = false;
+    let speakQueue = [];
+    let speaking = false;
+
+    ['1','2','3','4','5','6','7','8','9','*','0','#'].forEach(k => {
+      const b = document.createElement('button');
+      b.className = 'key';
+      b.textContent = k;
+      b.onclick = () => send({ type: 'dtmf', callId: activeCallId, digit: k });
+      keypadEl.appendChild(b);
+    });
+
+    function log(msg) {
+      const t = new Date();
+      const ts = t.toTimeString().slice(0, 8);
+      const div = document.createElement('div');
+      div.innerHTML = '<time>[' + ts + ']</time><span></span>';
+      div.querySelector('span').textContent = msg;
+      logEl.appendChild(div);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    }
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(proto + '//' + location.host + '/telephony');
+      ws.onopen = () => {
+        send({ type: 'hello', role: 'phone', phoneId });
+        setStatus('متصل شد. شناسه تلفن: ' + phoneId, 'connected');
+        log('اتصال به سرور تلفن برقرار شد');
+      };
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        handleMessage(msg);
+      };
+      ws.onclose = () => {
+        setStatus('اتصال قطع شد. در حال تلاش مجدد...', 'error');
+        setTimeout(connect, 3000);
+      };
+      ws.onerror = () => {};
+    }
+
+    function send(obj) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(obj));
+      }
+    }
+
+    function handleMessage(msg) {
+      if (msg.type === 'registered') {
+        phoneId = msg.phoneId;
+        setStatus('آماده. شناسه تلفن: ' + phoneId, 'connected');
+      } else if (msg.type === 'incoming' && msg.callId) {
+        activeCallId = msg.callId;
+        callerNameEl.textContent = (msg.name || 'اپراتور هوشمند') + (msg.subscriber ? ' - ' + msg.subscriber.name : '');
+        incomingEl.classList.add('show');
+        setStatus('تماس ورودی...', 'ringing');
+        log('تماس ورودی از ' + (msg.from || 'ناشناس'));
+      } else if (msg.type === 'audio' && msg.callId && msg.pcm) {
+        playPcm(msg.pcm);
+      } else if (msg.type === 'speak' && msg.callId && msg.text) {
+        speakText(msg.text);
+        log('اپراتور: ' + msg.text);
+      } else if (msg.type === 'dtmf' && msg.callId) {
+        log('کلید ' + msg.digit + ' ارسال شد');
+      } else if (msg.type === 'callEnded' && msg.callId) {
+        endCallUI('تماس پایان یافت');
+      } else if (msg.type === 'error') {
+        log('خطا: ' + msg.message);
+      }
+    }
+
+    async function ensureAudio() {
+      if (audioCtx || micStream !== null) return;
+      try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+      } catch (e) {
+        audioCtx = null;
+      }
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+        if (audioCtx) {
+          const source = audioCtx.createMediaStreamSource(micStream);
+          processor = audioCtx.createScriptProcessor(4096, 1, 1);
+          source.connect(processor);
+          processor.connect(audioCtx.destination);
+          processor.onaudioprocess = (e) => {
+            if (!activeCallId) return;
+            const input = e.inputBuffer.getChannelData(0);
+            const pcm16 = floatTo16(resample(input, audioCtx.sampleRate, 16000));
+            send({ type: 'audio', callId: activeCallId, pcm: int16ToBase64(pcm16) });
+          };
+        }
+        micAvailable = true;
+        log('میکروفون فعال شد');
+      } catch (e) {
+        micStream = null;
+        processor = null;
+        micAvailable = false;
+        log('میکروفون در دسترس نیست - حالت کلید دار (DTMF)');
+      }
+      if (audioCtx && audioCtx.state === 'suspended') {
+        try { await audioCtx.resume(); } catch (e) {}
+      }
+    }
+
+    function floatTo16(float32) {
+      const out = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return out;
+    }
+
+    function resample(data, fromRate, toRate) {
+      if (fromRate === toRate) return data;
+      const ratio = fromRate / toRate;
+      const len = Math.floor(data.length / ratio);
+      const out = new Float32Array(len);
+      for (let i = 0; i < len; i++) {
+        const pos = i * ratio;
+        const idx = Math.floor(pos);
+        const frac = pos - idx;
+        const a = data[Math.min(idx, data.length - 1)];
+        const b = data[Math.min(idx + 1, data.length - 1)];
+        out[i] = a + (b - a) * frac;
+      }
+      return out;
+    }
+
+    function int16ToBase64(arr) {
+      const bytes = new Uint8Array(arr.length * 2);
+      for (let i = 0; i < arr.length; i++) {
+        bytes[i * 2] = arr[i] & 0xff;
+        bytes[i * 2 + 1] = (arr[i] >> 8) & 0xff;
+      }
+      let binary = '';
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(binary);
+    }
+
+    function base64ToInt16(b64) {
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const out = new Int16Array(bytes.length / 2);
+      for (let i = 0; i < out.length; i++) {
+        out[i] = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
+      }
+      return out;
+    }
+
+    function playPcm(b64) {
+      if (!audioCtx) return;
+      const int16 = base64ToInt16(b64);
+      const float = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float[i] = int16[i] / 32768;
+      const resampled = resample(float, 16000, audioCtx.sampleRate);
+      const buffer = audioCtx.createBuffer(1, resampled.length, audioCtx.sampleRate);
+      buffer.copyToChannel(resampled, 0);
+      const src = audioCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(audioCtx.destination);
+      src.start();
+    }
+
+    function speakText(text) {
+      speakQueue.push(text);
+      if (!speaking) speakNext();
+    }
+
+    function speakNext() {
+      const next = speakQueue.shift();
+      if (!next) { speaking = false; return; }
+      speaking = true;
+      try {
+        const u = new SpeechSynthesisUtterance(next);
+        u.lang = 'fa-IR';
+        u.rate = 1.0;
+        u.onend = speakNext;
+        u.onerror = speakNext;
+        speechSynthesis.speak(u);
+        const fallback = setTimeout(speakNext, Math.max(3000, next.length * 120));
+        u.onend = () => { clearTimeout(fallback); speakNext(); };
+        u.onerror = () => { clearTimeout(fallback); speakNext(); };
+      } catch (e) {
+        speaking = false;
+      }
+    }
+
+    function endCallUI(reason) {
+      activeCallId = null;
+      incomingEl.classList.remove('show');
+      hangupBtn.disabled = true;
+      operatorBtn.disabled = false;
+      setStatus(reason, '');
+      log(reason);
+      if (processor) { try { processor.disconnect(); } catch (e) {} }
+      if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+      audioCtx = null;
+      processor = null;
+    }
+
+    acceptBtn.onclick = async () => {
+      await ensureAudio();
+      send({ type: 'accept', callId: activeCallId });
+      incomingEl.classList.remove('show');
+      hangupBtn.disabled = false;
+      operatorBtn.disabled = true;
+      setStatus(micAvailable ? 'در حال گفتگو...' : 'در حال گفتگو (حالت کلید دار)...', 'connected');
+      log('تماس پاسخ داده شد');
+    };
+
+    declineBtn.onclick = () => {
+      send({ type: 'decline', callId: activeCallId });
+      endCallUI('تماس رد شد');
+    };
+
+    operatorBtn.onclick = async () => {
+      await ensureAudio();
+      send({ type: 'callOperator' });
+      setStatus('در حال شماره‌گیری اپراتور...', 'ringing');
+      log('درخواست تماس با اپراتور هوشمند');
+    };
+
+    hangupBtn.onclick = () => {
+      send({ type: 'hangup', callId: activeCallId });
+      endCallUI('تماس قطع شد');
+    };
+
+    connect();
+  </script>
+</body>
+</html>
