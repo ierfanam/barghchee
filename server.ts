@@ -7,7 +7,9 @@ import dotenv from "dotenv";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import { GoogleGenAI } from "@google/genai";
-import { TelephonyService, TelephonySubscriber } from "./server/telephony";
+import { TelephonyService, TelephonySubscriber, classifyIntent } from "./server/telephony";
+import { JsonStore } from "./server/db";
+import { SmsGateway, receiptSms, installmentSms } from "./server/sms";
 
 import { createRequire } from "module";
 const nodeRequire = typeof __filename !== 'undefined' ? createRequire(__filename) : createRequire(import.meta.url);
@@ -45,22 +47,69 @@ async function startServer() {
   app.use(express.json());
   app.use(cors());
 
+  // ---- Persistent data store (survives restarts; PostgreSQL-ready repository layer) ----
+  const db = new JsonStore();
+
+  // ---- API authentication (enabled when API_TOKEN is set in .env) ----
+  const API_TOKEN = process.env.API_TOKEN || "";
+  const PUBLIC_PATHS = ["/api/auth/login", "/api/health"];
+  app.use("/api", (req: any, res, next) => {
+    if (!API_TOKEN) return next(); // auth disabled - open mode for local dev
+    const p = req.path as string;
+    if (PUBLIC_PATHS.some((pp) => p.startsWith(pp.replace(/^\/api/, "")))) return next();
+    const header = req.headers["authorization"] || "";
+    const queryToken = req.query?.token;
+    const provided = String(header).replace(/^Bearer\s+/i, "") || String(queryToken || "");
+    if (provided && provided === API_TOKEN) return next();
+    return res.status(401).json({ error: "unauthorized", hint: "Send 'Authorization: Bearer <API_TOKEN>' header" });
+  });
+
+  // ---- SMS gateway (KavehNova -> GSM modem -> outbox journal) ----
+  const smsGateway = new SmsGateway();
+
+  // ---- Realtime metrics ring buffer (last 60 minutes) ----
+  const metricBuckets: { minute: string; calls: number; connected: number; promised: number }[] = [];
+  function recordMetric(kind: "call" | "connected" | "promised") {
+    const minute = new Date().toISOString().slice(0, 16);
+    let bucket = metricBuckets.find((b) => b.minute === minute);
+    if (!bucket) {
+      bucket = { minute, calls: 0, connected: 0, promised: 0 };
+      metricBuckets.push(bucket);
+      if (metricBuckets.length > 60) metricBuckets.shift();
+    }
+    if (kind === "call") bucket.calls++;
+    if (kind === "connected") bucket.connected++;
+    if (kind === "promised") bucket.promised++;
+  }
+
   // API Routes
-  const transcriptsStore: any[] = [];
-  const systemLogs: { time: string; level: string; message: string }[] = [
-    { time: new Date().toISOString(), level: 'INFO', message: 'PBX Virtual Switch initialized successfully.' },
-    { time: new Date().toISOString(), level: 'INFO', message: 'Standalone telephony engine ready (SIP/RTP + browser phones + GSM modem, no external services).' }
-  ];
+  const transcriptsStore: any[] = db.getLogs ? [] : []; // kept for legacy transcript POSTs
+  const systemLogs: { time: string; level: string; message: string }[] = db.getLogs(50).length
+    ? db.getLogs(50)
+    : [
+        { time: new Date().toISOString(), level: "INFO", message: "PBX Virtual Switch initialized successfully." },
+        { time: new Date().toISOString(), level: "INFO", message: "Standalone telephony engine ready (SIP/RTP + browser phones + GSM modem, no external services)." },
+      ];
+  // Always log through the persistent store too
+  const logSystem = (level: string, message: string) => {
+    const entry = { time: new Date().toISOString(), level, message };
+    systemLogs.push(entry);
+    if (systemLogs.length > 200) systemLogs.splice(0, systemLogs.length - 200);
+    db.addLog(level, message);
+  };
 
   let campaignsRun = 0;
 
-  // In-memory subscribers database cache
-  let subscribersCache: any[] = [
+  // In-memory subscribers database cache (hydrated from persistent store)
+  let subscribersCache: any[] = db.getSubscribers().length
+    ? db.getSubscribers()
+    : [
     { id: "sub-1", billId: "1092837465012", name: "محمد رضایی", region: "مرداخ ایلام", phone: "09181234567", debt: 850000, status: "بدهکار", averageConsumption: "340 kWh", lastPayment: "1403/09/15" },
     { id: "sub-2", billId: "2093847561023", name: "علی مرادی", region: "خیابان طالقانی ایلام", phone: "09189876543", debt: 450000, status: "در انتظار پرداخت", averageConsumption: "290 kWh", lastPayment: "1403/10/01" },
     { id: "sub-3", billId: "3049586712345", name: "زهرا عباسی", region: "شهرک شهید کشوری", phone: "09184567890", debt: 0, status: "خوش حساب", averageConsumption: "180 kWh", lastPayment: "1403/11/10" },
     { id: "sub-4", billId: "4059678312456", name: "رضا کریمی", region: "بلوار امام (ره)", phone: "09183216549", debt: 1250000, status: "قطع انشعاب در آستانه", averageConsumption: "520 kWh", lastPayment: "1403/07/20" }
   ];
+  if (!db.getSubscribers().length) db.setSubscribers(subscribersCache);
 
   app.get("/api/subscribers", (req, res) => {
     const q = (req.query.q as string || "").toLowerCase();
@@ -97,6 +146,81 @@ async function startServer() {
 
   const telephony = new TelephonyService(lookupSubscriber, 5060);
 
+  // Attach GSM modem to the SMS gateway (modem can send real USSD-free SMS via AT+CMGS)
+  smsGateway.attachModem((telephony as any).gsmModemInstance || null);
+
+  // ---- LLM intent understanding hook (Gemini when GEMINI_API_KEY is available) ----
+  const llmIntentClassify = async (text: string, subscriber: TelephonySubscriber): Promise<string | null> {
+    if (!process.env.GEMINI_API_KEY) return null;
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const prompt = `You classify caller utterances in an Iranian electricity-bill IVR. Reply with EXACTLY one word from: pay_now, installment, operator, repeat, unknown.\nCaller: "${text}"\nContext: subscriber ${subscriber.name}, debt ${subscriber.debt} IRR.`;
+      const result = await ai.models.generateContent({ model: "gemini-2.0-flash", contents: prompt });
+      const answer = String(result.text || "").trim().toLowerCase();
+      const valid = ["pay_now", "installment", "operator", "repeat"];
+      return valid.includes(answer) ? answer : null;
+    } catch {
+      return null;
+    }
+  };
+  telephony.setLlmIntent(llmIntentClassify);
+
+  // ---- Call-ended integration: persist record, log commitments, send SMS receipts, create follow-ups ----
+  telephony.setOnCallEnded(async (record: any) => {
+    db.upsertCall(record);
+    recordMetric("call");
+    const outcome = String(record.outcome || "");
+    const sub = record.subscriber || {};
+    const durationMs = record.endedAt && record.startedAt ? new Date(record.endedAt).getTime() - new Date(record.startedAt).getTime() : 0;
+    if (record.state === "ended" && /connected/.test(String(record.transport)) !== false && record.dtmfLog?.length) recordMetric("connected");
+
+    if (/payment_promised/.test(outcome)) {
+      recordMetric("promised");
+      const dueDate = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+      db.addCommitment({
+        id: `cmt-${Date.now()}`, callId: record.id, subscriberPhone: sub.phone, subscriberName: sub.name,
+        type: "payment", amount: Number(sub.debt) || 0, dueDate, source: "ivr-dtmf", createdAt: new Date().toISOString(), fulfilled: false,
+      });
+      db.addTask({
+        id: `task-${Date.now()}`, subscriberPhone: sub.phone, subscriberName: sub.name, dueDate,
+        note: `پیگیری پرداخت قول داده‌شده مبلغ ${(Number(sub.debt) || 0).toLocaleString("fa-IR")} ریال`, done: false, createdAt: new Date().toISOString(),
+      });
+      const r = await smsGateway.send(sub.phone, receiptSms(sub, Number(sub.debt) || 0), "receipt");
+      db.addSms({ id: `sms-${Date.now()}`, to: sub.phone, body: receiptSms(sub, Number(sub.debt) || 0), kind: "receipt", status: r.ok ? "sent" : "queued", createdAt: new Date().toISOString(), sentAt: r.ok ? new Date().toISOString() : undefined, error: r.error });
+      logSystem("INFO", `Commitment recorded for ${sub.name}; SMS receipt via ${r.channel}${r.ok ? "" : " (queued)"}`);
+    } else if (/installment_confirmed/.test(outcome)) {
+      recordMetric("promised");
+      const debt = Number(sub.debt) || 0;
+      const plan = debt < 1000000 ? { count: 2, days: 10 } : debt < 5000000 ? { count: 3, days: 15 } : { count: 4, days: 30 };
+      const dueDate = new Date(Date.now() + plan.days * 86400000).toISOString().slice(0, 10);
+      db.addCommitment({
+        id: `cmt-${Date.now()}`, callId: record.id, subscriberPhone: sub.phone, subscriberName: sub.name,
+        type: "installment", amount: Math.ceil(debt / plan.count), installments: plan.count, dueDate, source: "ivr-dtmf", createdAt: new Date().toISOString(), fulfilled: false,
+      });
+      db.addTask({
+        id: `task-${Date.now()}`, subscriberPhone: sub.phone, subscriberName: sub.name, dueDate,
+        note: `سررسید قسط اول (${plan.count} قسطی)`, done: false, createdAt: new Date().toISOString(),
+      });
+      const r = await smsGateway.send(sub.phone, installmentSms(sub, plan.count, Math.ceil(debt / plan.count), plan.days), "installment");
+      db.addSms({ id: `sms-${Date.now()}`, to: sub.phone, body: installmentSms(sub, plan.count, Math.ceil(debt / plan.count), plan.days), kind: "installment", status: r.ok ? "sent" : "queued", createdAt: new Date().toISOString(), error: r.error });
+      logSystem("INFO", `Installment plan confirmed for ${sub.name}; SMS via ${r.channel}${r.ok ? "" : " (queued)"}`);
+    } else if (/no_answer|declined|phone_not_found|busy/.test(outcome)) {
+      // auto-retry policy from strategy profile
+      if (aiStrategyRef.autoRetryNoAnswer && sub.phone) {
+        db.addTask({
+          id: `task-${Date.now()}`, subscriberPhone: sub.phone, subscriberName: sub.name || "مشترک",
+          dueDate: new Date(Date.now() + 86400000).toISOString().slice(0, 10),
+          note: `تماس بی‌پاسخ (${outcome}) - تلاش مجدد خودکار`, done: false, createdAt: new Date().toISOString(),
+        });
+        logSystem("INFO", `Auto-retry scheduled for ${sub.phone} (${outcome})`);
+      }
+    }
+    void durationMs;
+  });
+
+  // Mutable reference used by the call-ended hook (defined right below with the strategy loader)
+  const aiStrategyRef: any = { autoRetryNoAnswer: false };
+
   // ---- AI conversation strategy profile (persisted to disk so tuning survives restarts) ----
   const STRATEGY_FILE = path.join(process.cwd(), "data", "ai-strategy.json");
   const defaultStrategy = {
@@ -105,6 +229,8 @@ async function startServer() {
     persistenceLevel: 80,      // 0..100 -> max menu repeats before hangup
     responseDelayMs: 300,      // pause between AI sentences
     autoRetryNoAnswer: false,  // campaign feature: retry unanswered calls once
+    language: "fa",            // fa | az | ar | en (bilingual IVR)
+    llmEnabled: true,          // Gemini intent understanding fallback
   };
   let aiStrategy: any = { ...defaultStrategy };
   try {
@@ -113,6 +239,7 @@ async function startServer() {
     }
   } catch { /* fall back to defaults */ }
   telephony.applyStrategy(aiStrategy);
+  Object.assign(aiStrategyRef, aiStrategy);
 
   app.get("/api/strategy", (req, res) => {
     res.json({ success: true, strategy: aiStrategy });
@@ -125,11 +252,14 @@ async function startServer() {
     if (b.persistenceLevel !== undefined) aiStrategy.persistenceLevel = Math.max(0, Math.min(100, Number(b.persistenceLevel) || 0));
     if (b.responseDelayMs !== undefined) aiStrategy.responseDelayMs = Math.max(0, Math.min(3000, Number(b.responseDelayMs) || 0));
     if (b.autoRetryNoAnswer !== undefined) aiStrategy.autoRetryNoAnswer = !!b.autoRetryNoAnswer;
+    if (typeof b.language === "string" && ["fa","az","ar","en"].includes(b.language)) aiStrategy.language = b.language;
+    if (b.llmEnabled !== undefined) aiStrategy.llmEnabled = !!b.llmEnabled;
     try {
       nodeRequire("fs").mkdirSync(path.dirname(STRATEGY_FILE), { recursive: true });
       nodeRequire("fs").writeFileSync(STRATEGY_FILE, JSON.stringify(aiStrategy, null, 2));
       telephony.applyStrategy(aiStrategy);
-      systemLogs.push({ time: new Date().toISOString(), level: "INFO", message: `AI strategy updated: tone=${aiStrategy.tone}, empathy=${aiStrategy.empathyLevel}%, persistence=${aiStrategy.persistenceLevel}%` });
+      Object.assign(aiStrategyRef, aiStrategy);
+      logSystem("INFO", `AI strategy updated: tone=${aiStrategy.tone}, empathy=${aiStrategy.empathyLevel}%, persistence=${aiStrategy.persistenceLevel}%, lang=${aiStrategy.language}`);
       res.json({ success: true, strategy: aiStrategy });
     } catch (e: any) {
       res.status(500).json({ success: false, error: e.message });
@@ -162,7 +292,7 @@ async function startServer() {
     if (!sub.phone) return res.status(400).json({ error: "phone_required" });
     try {
       const record = await telephony.startOutboundCall(sub, { transport: transport || 'sip', phoneId });
-      systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Outbound AI call initiated to ${sub.phone} (${sub.name}) via standalone telephony.` });
+      logSystem("INFO", `Outbound AI call initiated to ${sub.phone} (${sub.name}) via standalone telephony.` });
       res.json({ success: true, call: record });
     } catch (e: any) {
       res.status(500).json({ success: false, error: e.message });
@@ -184,6 +314,9 @@ async function startServer() {
     res.json({ success: ok });
   });
 
+  // keep the in-memory cache and the persistent store in sync after every mutation
+  const persistSubscribers = () => db.setSubscribers(subscribersCache);
+
   app.post("/api/subscribers", (req, res) => {
     const newSub = {
       id: `sub-${Date.now()}`,
@@ -197,8 +330,31 @@ async function startServer() {
       lastPayment: req.body.lastPayment || '1403/11/01'
     };
     subscribersCache.push(newSub);
-    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Subscriber added: ${newSub.name} (${newSub.billId})` });
+    persistSubscribers();
+    logSystem('INFO', `Subscriber added: ${newSub.name} (${newSub.billId})`);
     res.json({ success: true, subscriber: newSub });
+  });
+
+  app.put("/api/subscribers/:id", (req, res) => {
+    const idx = subscribersCache.findIndex((s) => s.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: "subscriber_not_found" });
+    const allowed = ["name", "region", "phone", "billId", "status", "averageConsumption", "lastPayment"];
+    const patch: any = {};
+    for (const k of allowed) if (req.body[k] !== undefined) patch[k] = req.body[k];
+    if (req.body.debt !== undefined) patch.debt = Number(req.body.debt) || 0;
+    subscribersCache[idx] = { ...subscribersCache[idx], ...patch };
+    persistSubscribers();
+    logSystem("INFO", `Subscriber updated: ${subscribersCache[idx].name} (${req.params.id})`);
+    res.json({ success: true, subscriber: subscribersCache[idx] });
+  });
+
+  app.delete("/api/subscribers/:id", (req, res) => {
+    const idx = subscribersCache.findIndex((s) => s.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: "subscriber_not_found" });
+    const [removed] = subscribersCache.splice(idx, 1);
+    persistSubscribers();
+    logSystem("INFO", `Subscriber removed: ${removed.name} (${removed.id})`);
+    res.json({ success: true });
   });
 
   app.post("/api/campaigns/run", async (req, res) => {
@@ -247,6 +403,137 @@ async function startServer() {
       campaignId: campaignsRun,
       subscribers: targetSubscribers
     });
+  });
+
+  // ---- KPI reports: aggregate persisted calls/commitments/SMS into dashboard metrics ----
+  const outcomeBucket = (outcome: string) => {
+    const o = String(outcome || "");
+    if (/payment_promised/.test(o)) return "paymentPromised";
+    if (/installment_confirmed/.test(o)) return "installmentConfirmed";
+    if (/completed/.test(o)) return "completed";
+    if (/no_answer/.test(o)) return "noAnswer";
+    if (/busy/.test(o)) return "busy";
+    if (/declined|rejected/.test(o)) return "declined";
+    if (/operator_transfer/.test(o)) return "operatorTransfer";
+    return "other";
+  };
+
+  app.get("/api/reports/kpi", (req, res) => {
+    const rangeHours = Math.max(1, Math.min(24 * 30, Number(req.query.hours) || 72));
+    const since = Date.now() - rangeHours * 3600 * 1000;
+    const calls = db.getCalls().filter((c: any) => new Date(c.startedAt || c.endedAt || 0).getTime() >= since);
+
+    let connected = 0, totalDurationMs = 0, commitmentsCount = 0, promisedAmount = 0;
+    const outcomes: Record<string, number> = {};
+    const byRegion: Record<string, number> = {};
+    for (const c of calls as any[]) {
+      const bucket = outcomeBucket(c.outcome);
+      outcomes[bucket] = (outcomes[bucket] || 0) + 1;
+      if (bucket !== "noAnswer" && bucket !== "busy") connected++;
+      if (c.startedAt && c.endedAt) totalDurationMs += new Date(c.endedAt).getTime() - new Date(c.startedAt).getTime();
+      const region = c.subscriber?.region || "نامشخص";
+      byRegion[region] = (byRegion[region] || 0) + 1;
+    }
+    const commitments = db.getCommitments().filter((x) => new Date(x.createdAt).getTime() >= since);
+    commitmentsCount = commitments.length;
+    promisedAmount = commitments.filter((x) => !x.fulfilled).reduce((a, x) => a + (Number(x.amount) || 0), 0);
+
+    const hourly: { hour: string; calls: number; promises: number }[] = [];
+    for (let i = Math.min(rangeHours, 48) - 1; i >= 0; i--) {
+      const hStart = Date.now() - i * 3600 * 1000;
+      const key = new Date(hStart).toISOString().slice(0, 13);
+      const inHour = (calls as any[]).filter((c) => String(c.startedAt || "").startsWith(key)).length;
+      const promisesInHour = commitments.filter((x) => String(x.createdAt).startsWith(key)).length;
+      hourly.push({ hour: key, calls: inHour, promises: promisesInHour });
+    }
+
+    res.json({
+      success: true,
+      rangeHours,
+      totals: {
+        calls: calls.length,
+        connected,
+        connectionRate: calls.length ? Math.round((connected / calls.length) * 100) : 0,
+        avgDurationSec: connected ? Math.round(totalDurationMs / connected / 1000) : 0,
+        commitments: commitmentsCount,
+        promisedAmount,
+        fulfilledAmount: db.getCommitments().filter((x) => x.fulfilled).reduce((a, x) => a + (Number(x.amount) || 0), 0),
+        smsSent: db.getSms().filter((s) => s.status === "sent").length,
+        smsQueued: db.getSms().filter((s) => s.status === "queued").length,
+        openTasks: db.getTasks().filter((t) => !t.done).length,
+        debtCollectionRate: calls.length ? Math.round((commitmentsCount / calls.length) * 100) : 0,
+      },
+      outcomes,
+      byRegion,
+      hourly,
+      realtime: metricBuckets.slice(-30),
+      generatedAt: new Date().toISOString(),
+    });
+  });
+
+  // CSV export of the call ledger (Excel-compatible with UTF-8 BOM)
+  app.get("/api/reports/export.csv", (req, res) => {
+    const rows = [
+      ["شناسه تماس", "مشترک", "شماره", "منطقه", "بدهی (ریال)", "ترانسپورت", "وضعیت", "نتیجه", "شروع", "پایان", "مدت (ثانیه)"],
+      ...db.getCalls().map((c: any) => [
+        c.id, c.subscriber?.name || "", c.subscriber?.phone || "", c.subscriber?.region || "",
+        Number(c.subscriber?.debt) || 0, c.transport || "", c.state || "", c.outcome || "",
+        c.startedAt || "", c.endedAt || "",
+        c.startedAt && c.endedAt ? Math.round((new Date(c.endedAt).getTime() - new Date(c.startedAt).getTime()) / 1000) : 0,
+      ]),
+    ];
+    const csv = "\uFEFF" + rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="gardafarin-calls-${Date.now()}.csv"`);
+    res.send(csv);
+  });
+
+  // ---- Commitments & follow-up tasks ----
+  app.get("/api/commitments", (req, res) => {
+    res.json({ commitments: db.getCommitments(), tasks: db.getTasks() });
+  });
+
+  app.post("/api/commitments/:id/fulfill", (req, res) => {
+    const found = db.markCommitmentFulfilledById(req.params.id);
+    if (!found) return res.status(404).json({ error: "commitment_not_found" });
+    logSystem("INFO", `Commitment marked fulfilled: ${found.subscriberName} (${found.amount} ریال)`);
+    res.json({ success: true, commitment: found });
+  });
+
+  app.post("/api/tasks/:id/toggle", (req, res) => {
+    const t = db.toggleTask(req.params.id);
+    if (!t) return res.status(404).json({ error: "task_not_found" });
+    res.json({ success: true, task: t });
+  });
+
+  // ---- SMS outbox journal ----
+  app.get("/api/sms", (req, res) => {
+    res.json({ messages: db.getSms(), channels: smsGateway.channelInfo });
+  });
+
+  app.post("/api/sms/send", async (req, res) => {
+    const to = String(req.body.to || "");
+    const body = String(req.body.body || "");
+    if (!to || !body) return res.status(400).json({ error: "to_and_body_required" });
+    const r = await smsGateway.send(to, body, req.body.kind || "reminder");
+    db.addSms({ id: `sms-${Date.now()}`, to, body, kind: req.body.kind || "reminder", status: r.ok ? "sent" : "queued", createdAt: new Date().toISOString(), error: r.error });
+    logSystem(r.ok ? "INFO" : "WARN", `Manual SMS to ${to} via ${r.channel}${r.ok ? "" : ` (queued: ${r.error || "no gateway"})`}`);
+    res.json({ success: true, result: r });
+  });
+
+  // ---- NLU test endpoint: rule-based classifier with optional Gemini refinement ----
+  app.post("/api/nlu", async (req, res) => {
+    const text = String(req.body.text || "");
+    const local = classifyIntent(text);
+    let llm: string | null = null;
+    if (aiStrategy.llmEnabled && process.env.GEMINI_API_KEY) {
+      llm = await llmIntentClassify(text, { name: "-", phone: "-", debt: 0 } as any).catch(() => null);
+    }
+    res.json({ text, intent: llm || local.intent, confidence: llm ? 0.95 : local.confidence, ruleBased: local, llm });
+  });
+
+  app.get("/api/health", (_req, res) => {
+    res.json({ ok: true, uptimeSec: Math.round(process.uptime()), time: new Date().toISOString() });
   });
 
   app.get("/api/diagnostics", (req, res) => {
@@ -463,9 +750,18 @@ async function startServer() {
 
   const providerManager = new ProviderManager();
 
+  // ---- Mirror live telephony events to every dashboard client on /live ----
+  const liveClients = new Set<any>();
+  telephony.setEventSink((obj: any) => {
+    liveClients.forEach((ws) => safeSend(ws, obj));
+  });
+
   liveWss.on('connection', async (clientWs, request) => {
     let isClientOpen = true;
     let session: any = null;
+    liveClients.add(clientWs);
+    const detachLiveClient = () => { liveClients.delete(clientWs); };
+    clientWs.on('close', detachLiveClient);
 
     clientWs.on('error', (err: any) => {
       console.warn('Live client socket note:', err?.message || 'closed');
@@ -1059,7 +1355,7 @@ async function startServer() {
         safeSend(clientWs, { error: 'ارتباط با هوش مصنوعی برقرار نشد: ' + errorMsg });
       }
     }
-  });
+ );
 }
 
 startServer();

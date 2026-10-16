@@ -33,7 +33,7 @@ export class GdmLiveAudio extends LitElement {
   @state() aiLogs: {time: string, message: string}[] = [];
 
   // PBX Console & Web Agent Simulation Properties
-  @state() activeTab: 'monitor' | 'subscribers' | 'strategy' | 'webagent' | 'logs' = 'monitor';
+  @state() activeTab: 'monitor' | 'subscribers' | 'strategy' | 'reports' | 'webagent' | 'logs' = 'monitor';
   @state() subscribersList: any[] = [];
   @state() searchQuery: string = '';
   @state() systemLogsList: any[] = [];
@@ -46,6 +46,14 @@ export class GdmLiveAudio extends LitElement {
   @state() empathyLevel: number = 75;
   @state() persistenceLevel: number = 80;
   @state() responseDelay: number = 300;
+  @state() strategyLanguage: string = 'fa';
+  @state() strategyLlmEnabled: boolean = true;
+  @state() strategyAutoRetry: boolean = false;
+  @state() strategySaveStatus: string = '';
+  @state() kpiData: any = null;
+  @state() commitmentsList: any[] = [];
+  @state() followUpTasks: any[] = [];
+  @state() smsLogList: any[] = [];
   @state() isHumanTakeoverActive = false;
   @state() humanTextResponse = '';
   @state() isCampaignRunning = false;
@@ -1899,6 +1907,19 @@ export class GdmLiveAudio extends LitElement {
           }
           if (msg.type === 'callEvent' && msg.event === 'ended') {
             this.fetchTelephonyStatus();
+            this.fetchKpi();
+            this.fetchCommitments();
+          }
+          // Campaign calls that the operator is not watching directly: keep the live feed populated
+          if (msg.type === 'callEvent' && !this.activeOutboundCall && ['ringing', 'dialing', 'connected'].includes(msg.event)) {
+            const rec: any = telephonyRecordCache.get(msg.callId);
+            if (rec) {
+              this.activeOutboundCall = {
+                callId: msg.callId, name: rec.name || 'مشترک', phone: rec.phone || '', debt: Number(rec.debt) || 0,
+                status: msg.event === 'connected' ? 'در حال گفتگوی زنده' : 'در حال زنگ زدن...', state: msg.event,
+                transport: rec.transport || 'sip', aiMode: 'local-engine', conversation: [],
+              };
+            }
           }
         } catch (e) {}
       };

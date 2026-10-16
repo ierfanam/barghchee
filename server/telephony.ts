@@ -52,6 +52,8 @@ export interface StrategyProfile {
   empathyLevel: number;    // 0..100
   persistenceLevel: number;// 0..100 -> controls menu repeat attempts
   responseDelayMs: number; // extra pause between AI sentences
+  language: string;        // fa | az | ar | en (bilingual IVR prompts)
+  llmEnabled: boolean;     // free-voice intent understanding via Gemini when available
 }
 
 const defaultStrategy: StrategyProfile = {
@@ -59,7 +61,33 @@ const defaultStrategy: StrategyProfile = {
   empathyLevel: 75,
   persistenceLevel: 80,
   responseDelayMs: 300,
+  language: 'fa',
+  llmEnabled: true,
 };
+
+// Local rule-based Persian intent classifier (zero-dependency NLU).
+// Returns an intent tag used both by the engine and exposed via /api/nlu.
+export function classifyIntent(rawText: string): { intent: string; confidence: number } {
+  const t = normalizePersian(String(rawText || '')).toLowerCase();
+  if (!t) return { intent: 'unknown', confidence: 0 };
+  const rules: [string, RegExp][] = [
+    ['pay_now', /پرداخت|تسویه|پردا?خت می?کنم|همین الان|واریز|cart به cart|کارت به کارت/],
+    ['installment', /قسط|اقساط|تقسيط|بخش?بندی|چند مرحله/],
+    ['operator', /انسانی|اپراتور|مشاور|نفر|مسئول|پشتیبانی/],
+    ['amount_question', /مبلغ|چقدر|قیمت|چنده|رقم| بدهی|بدهکار/],
+    ['already_paid', /قبلاً? پرداخت|داده?ام|پرداختم|تسویه کردم|واریز کردم/],
+    ['complaint', /شکایت|اعتراض|بد|توهین|مزاحم|قضاوت/],
+    ['repeat', /تکرار|دوباره|باز بگو|نفهمیدم|صدا? clear نبود/],
+    ['no_debt', /ندارم|بدهکار نیستم|اشتباه/],
+    ['goodbye', /خداحافظ|خدافظ|فعلا|باخدا/],
+    ['yes', /^(بله|آره|حتما|قربان|چشم|اوکی|باشه)/],
+    ['no', /^(نه|نمی?خواهم|اصلا|کیف نمی?کنم)/],
+  ];
+  for (const [intent, re] of rules) {
+    if (re.test(t)) return { intent, confidence: 0.85 };
+  }
+  return { intent: 'unknown', confidence: 0.3 };
+}
 
 let activeStrategy: StrategyProfile = { ...defaultStrategy };
 
@@ -958,12 +986,39 @@ class ConversationEngine {
     }
   }
 
+  // Optional LLM hook installed by the server (Gemini-based intent understanding).
+  private llmIntent: ((text: string, subscriber: TelephonySubscriber) => Promise<string | null>) | null = null;
+
+  setLlmIntent(fn: (text: string, subscriber: TelephonySubscriber) => Promise<string | null>) {
+    this.llmIntent = fn;
+  }
+
   async handleVoiceText(text: string) {
     const t = normalizePersian(text);
-    if (/پرداخت|تسویه|قبض/.test(t)) await this.handleDtmf('1');
-    else if (/قسط|اقساط|تقسيط/.test(t)) await this.handleDtmf('2');
-    else if (/انسانی|اپراتور|مشاور/.test(t)) await this.handleDtmf('3');
-    else if (/تکرار|دوباره|باز/.test(t)) await this.handleDtmf('9');
+    // 1) Fast local rule-based NLU
+    const local = classifyIntent(t);
+    let digit: string | null = null;
+    if (local.intent === 'pay_now' || /قبض/.test(t)) digit = '1';
+    else if (local.intent === 'installment') digit = '2';
+    else if (local.intent === 'operator') digit = '3';
+    else if (local.intent === 'repeat') digit = '9';
+
+    // 2) If nothing matched and LLM mode is on, ask Gemini to classify the intent
+    if (!digit && this.strategy.llmEnabled && this.llmIntent && local.intent === 'unknown') {
+      try {
+        const llmTag = await this.llmIntent(t, this.subscriber);
+        if (llmTag === 'pay_now') digit = '1';
+        else if (llmTag === 'installment') digit = '2';
+        else if (llmTag === 'operator') digit = '3';
+        else if (llmTag === 'repeat') digit = '9';
+      } catch { /* fall through silently */ }
+    }
+
+    if (digit) await this.handleDtmf(digit);
+    else {
+      await this.line(`متوجه منظور شما نشدم. ${this.menuText()}`);
+      this.scheduleRepeat();
+    }
   }
 
   async speak(text: string) {
@@ -999,12 +1054,28 @@ class ConversationEngine {
     return { count: 4, amount: Math.ceil(debt / 4), days: 30 };
   }
 
+  // Bilingual prompt layer: when language is set to az/ar/en the engine appends a
+  // translated menu line after the Persian one (Ilam is multilingual: Kurdish/Turkish/Arabic speakers).
+  private langPrompt(kind: 'menu' | 'greeting'): string {
+    const lang = this.strategy.language;
+    if (kind === 'menu') {
+      if (lang === 'az') return 'Ödəniş üçün 1, taksit üçün 2, operator üçün 3 düyməsini basın.';
+      if (lang === 'ar') return 'اضغط 1 للدفع، أو 2 للتقسيط، أو 3 للحديث مع موظف.';
+      if (lang === 'en') return 'Press 1 to pay, 2 for installments, or 3 to speak with an agent.';
+      return '';
+    }
+    if (lang === 'az') return 'İlam Elektrik Şirkətindən avtomatik zəng.';
+    if (lang === 'ar') return 'اتصال آلي من شركة توزيع كهرباء محافظة إيلام.';
+    if (lang === 'en') return 'This is an automated call from Ilam Electricity Distribution Company.';
+    return '';
+  }
+
   private greetingText(): string {
     const empathetic = this.strategy.empathyLevel >= 50;
     const opening = empathetic
       ? 'امیدوارم حالتون خوب باشه و مزاحمتون نشیم.'
       : 'این تماس اطلاع‌رسانی حساب برق شماست.';
-    return `سلام ${this.subscriber.name} عزیز، وقتتون بخیر. از طرف شرکت توزیع نیروی برق استان ایلام با شما صحبت می‌کنم. ${opening} این تماس به صورت خودکار و رایگان انجام می‌شود.`;
+    return `سلام ${this.subscriber.name} عزیز، وقتتون بخیر. از طرف شرکت توزیع نیروی برق استان ایلام با شما صحبت می‌کنم. ${opening} این تماس به صورت خودکار و رایگان انجام می‌شود.${this.langPrompt('greeting') ? ' ' + this.langPrompt('greeting') : ''}`;
   }
 
   private noticeText(): string {
@@ -1023,7 +1094,9 @@ class ConversationEngine {
   }
 
   private menuText(): string {
-    return `لطفاً یکی از گزینه‌ها را انتخاب کنید. برای تأیید و تسویه پرداخت، کلید ۱. برای درخواست قسط‌بندی، کلید ۲. برای صحبت با اپراتور انسانی، کلید ۳. برای شنیدن مجدد این گزینه‌ها، کلید ۹.`;
+    const base = `لطفاً یکی از گزینه‌ها را انتخاب کنید. برای تأیید و تسویه پرداخت، کلید ۱. برای درخواست قسط‌بندی، کلید ۲. برای صحبت با اپراتور انسانی، کلید ۳. برای شنیدن مجدد این گزینه‌ها، کلید ۹.`;
+    const extra = this.langPrompt('menu');
+    return extra ? `${base} ${extra}` : base;
   }
 
   private paymentDateText(): string {
@@ -1061,6 +1134,9 @@ class CallSession {
   private ended = false;
   onEvent: ((e: any) => void) | null = null;
   onTranscript: ((line: TranscriptLine) => void) | null = null;
+  // Callbacks installed by TelephonyService for persistence, SMS receipts and follow-ups
+  onCallEnded: ((record: CallRecord) => void) | null = null;
+  llmIntentFn: ((text: string, subscriber: TelephonySubscriber) => Promise<string | null>) | null = null;
 
   constructor(subscriber: TelephonySubscriber, direction: 'outbound' | 'inbound') {
     this.record = {
@@ -1076,6 +1152,11 @@ class CallSession {
       dtmfLog: [],
     };
     this.engine = new ConversationEngine(subscriber, (e) => this.handleEngineEvent(e));
+    // Bridge the LLM intent hook from the service into the engine
+    this.engine.setLlmIntent(async (text, sub) => {
+      if (!this.llmIntentFn) return null;
+      return this.llmIntentFn(text, sub);
+    });
   }
 
   // Re-apply the current strategy profile to a live session's engine (takeover/reset)
@@ -1268,6 +1349,19 @@ export class TelephonyService {
     this.calls.forEach((session) => session.reapplyStrategy());
   }
 
+  // Install server-side integrations: LLM intent understanding + call-ended persistence/SMS hook
+  setLlmIntent(fn: (text: string, subscriber: TelephonySubscriber) => Promise<string | null>) {
+    (this as any).llmIntentFn = fn;
+  }
+
+  setOnCallEnded(fn: (record: CallRecord) => void) {
+    (this as any).callEndedHook = fn;
+  }
+
+  get gsmModemInstance() {
+    return this.gsmModem;
+  }
+
   get sipStatus() {
     return {
       port: this.sip.localPort,
@@ -1332,7 +1426,13 @@ export class TelephonyService {
 
   private broadcast(obj: any) {
     this.consoles.forEach((ws) => this.safeSend(ws, obj));
+    if (this.externalSink) { try { this.externalSink(obj); } catch {} }
   }
+
+  // External sink so the HTTP server can mirror engine events onto other WS channels
+  // (e.g. the /live dashboard channel used by the main UI).
+  private externalSink: ((obj: any) => void) | null = null;
+  setEventSink(fn: ((obj: any) => void) | null) { this.externalSink = fn; }
 
   private handleWsConnection(ws: WebSocket) {
     let role: 'console' | 'phone' | null = null;
@@ -1596,6 +1696,7 @@ export class TelephonyService {
   }
 
   private wireSession(session: CallSession) {
+    session.llmIntentFn = (this as any).llmIntentFn || null;
     session.onEvent = (e) => {
       this.broadcast({ type: 'callEvent', callId: session.record.id, ...e });
       if (e.event === 'ended') this.finalizeCall(session);
@@ -1636,6 +1737,11 @@ export class TelephonyService {
       if (entry.busyCallId === record.id) entry.busyCallId = null;
     });
     if (this.activeGsmSession === session) this.activeGsmSession = null;
+    // Notify the server layer (persistence, KPIs, SMS receipts, follow-up tasks)
+    try {
+      const hook = (this as any).callEndedHook;
+      if (hook) hook(JSON.parse(JSON.stringify(record)));
+    } catch {}
     session.destroy();
   }
 }

@@ -106,6 +106,34 @@ export class GsmModem {
     });
   }
 
+  // Send an SMS via AT+CMGS using PDU-free text mode (GSM UCS2 hex for Persian support)
+  async sendSms(number: string, text: string): Promise<boolean> {
+    if (!this.port || !this.opened) return false;
+    try {
+      await this.at('AT+CMGF=1');
+      await this.at('AT+CSCS="UCS2"');
+      const normalized = String(number).replace(/^0/, '98').replace(/[^0-9]/g, '');
+      const hexBody = Buffer.from(text, 'utf16le')
+        .swap16()
+        .toString('hex')
+        .toUpperCase();
+      const res = await this.at(`AT+CMGS="${normalized}"`, 8000);
+      // After '>' prompt, write body + Ctrl-Z
+      await new Promise<void>((resolve, reject) => {
+        if (!this.port) return reject(new Error('port closed'));
+        this.port.write(hexBody + '\x1A', (err: any) => (err ? reject(err) : resolve()));
+      });
+      const sent = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('CMGS timeout')), 15000);
+        this.responseQueue.push({ resolve, reject, timer });
+      });
+      return /OK|\+CMGS/.test(res + ' ' + sent);
+    } catch (e: any) {
+      this.log('sendSms failed: ' + (e?.message || e));
+      return false;
+    }
+  }
+
   private handleData(data: Buffer) {
     this.buffer += data.toString('latin1');
     let idx: number;
