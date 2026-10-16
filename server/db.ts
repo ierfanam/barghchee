@@ -41,6 +41,44 @@ export interface FollowUpTask {
   createdAt: string;
 }
 
+export interface OutageReport {
+  id: string;
+  address: string;
+  region?: string;
+  billId?: string;
+  subscriberName?: string;
+  phone?: string;
+  status: 'registered' | 'assigned' | 'resolved';
+  trackingCode: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ServiceRequest {
+  id: string;
+  requestType: string;
+  nationalId: string;
+  phoneNumber: string;
+  billId?: string;
+  subscriberName?: string;
+  status: 'submitted' | 'processing' | 'completed';
+  referenceCode: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PaymentRecord {
+  id: string;
+  billId: string;
+  amount: number;
+  method: 'online' | 'pos' | 'ivr-dtmf' | 'manual';
+  reference: string;
+  transactionResult?: string;
+  paidAt: string;
+  subscriberName?: string;
+  phone?: string;
+}
+
 interface StoreShape {
   subscribers: any[];
   calls: any[];
@@ -48,6 +86,9 @@ interface StoreShape {
   commitments: Commitment[];
   tasks: FollowUpTask[];
   logs: { time: string; level: string; message: string }[];
+  outages: OutageReport[];
+  serviceRequests: ServiceRequest[];
+  payments: PaymentRecord[];
 }
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
@@ -57,7 +98,7 @@ const MAX_LOGS = 1000;
 const MAX_SMS = 500;
 
 function load(): StoreShape {
-  const empty: StoreShape = { subscribers: [], calls: [], smsOutbox: [], commitments: [], tasks: [], logs: [] };
+  const empty: StoreShape = { subscribers: [], calls: [], smsOutbox: [], commitments: [], tasks: [], logs: [], outages: [], serviceRequests: [], payments: [] };
   try {
     if (fs.existsSync(DB_FILE)) {
       const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
@@ -175,5 +216,62 @@ export class JsonStore {
     this.data.logs.push({ time: new Date().toISOString(), level, message });
     if (this.data.logs.length > MAX_LOGS) this.data.logs.splice(0, this.data.logs.length - MAX_LOGS);
     this.scheduleFlush();
+  }
+
+  // ---- Outage reports (121-style incident register) ----
+  getOutages() { return this.data.outages; }
+  addOutage(o: OutageReport) {
+    this.data.outages.unshift(o);
+    if (this.data.outages.length > MAX_SMS) this.data.outages.length = MAX_SMS;
+    this.scheduleFlush();
+  }
+  updateOutage(id: string, patch: Partial<OutageReport>) {
+    const o = this.data.outages.find((x) => x.id === id);
+    if (o) { Object.assign(o, patch, { updatedAt: new Date().toISOString() }); this.scheduleFlush(); }
+    return o || null;
+  }
+
+  // ---- Online service requests (انشعاب جدید، تغییر نام و...) ----
+  getServiceRequests() { return this.data.serviceRequests; }
+  addServiceRequest(r: ServiceRequest) {
+    this.data.serviceRequests.unshift(r);
+    if (this.data.serviceRequests.length > MAX_SMS) this.data.serviceRequests.length = MAX_SMS;
+    this.scheduleFlush();
+  }
+  updateServiceRequest(id: string, patch: Partial<ServiceRequest>) {
+    const r = this.data.serviceRequests.find((x) => x.id === id);
+    if (r) { Object.assign(r, patch, { updatedAt: new Date().toISOString() }); this.scheduleFlush(); }
+    return r || null;
+  }
+
+  // ---- Payment ledger (real settlements reconcile commitments & debt) ----
+  getPayments() { return this.data.payments; }
+  addPayment(p: PaymentRecord) {
+    this.data.payments.unshift(p);
+    if (this.data.payments.length > MAX_CALLS * 4) this.data.payments.length = MAX_CALLS * 4;
+    this.scheduleFlush();
+  }
+
+  // Reconcile a subscriber's debt after a verified payment: reduce debt, mark
+  // matching commitments fulfilled and clear their follow-up tasks.
+  applyPaymentToSubscriber(subscriberId: string, amount: number): { subscriber: any; fulfilledCommitments: Commitment[] } | null {
+    const idx = this.data.subscribers.findIndex((s) => s.id === subscriberId);
+    if (idx === -1) return null;
+    const sub = this.data.subscribers[idx];
+    const remaining = Math.max(0, (Number(sub.debt) || 0) - amount);
+    const status = remaining === 0 ? 'خوش حساب' : sub.status;
+    this.data.subscribers[idx] = { ...sub, debt: remaining, status, lastPayment: new Date().toISOString().slice(0, 10) };
+    const phone = String(sub.phone || '');
+    const smsPhone = String(sub.smsPhone || '');
+    const fulfilledCommitments = this.data.commitments.filter(
+      (c) => !c.fulfilled && (c.subscriberPhone === phone || c.subscriberPhone === smsPhone)
+    );
+    for (const c of fulfilledCommitments) {
+      c.fulfilled = true;
+      const task = this.data.tasks.find((t) => !t.done && t.subscriberPhone === c.subscriberPhone && /پرداخت|قسط/.test(t.note));
+      if (task) task.done = true;
+    }
+    this.scheduleFlush();
+    return { subscriber: this.data.subscribers[idx], fulfilledCommitments };
   }
 }
