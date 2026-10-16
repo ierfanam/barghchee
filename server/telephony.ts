@@ -41,8 +41,34 @@ export interface CallRecord {
   endedAt?: string;
   outcome?: string;
   aiMode: 'local';
+  tone?: string;
   transcript: TranscriptLine[];
   dtmfLog: { time: string; digit: string }[];
+}
+
+// Tunable AI conversation strategy (set from the dashboard, persisted server-side)
+export interface StrategyProfile {
+  tone: string;            // friendly | firm | compromise
+  empathyLevel: number;    // 0..100
+  persistenceLevel: number;// 0..100 -> controls menu repeat attempts
+  responseDelayMs: number; // extra pause between AI sentences
+}
+
+const defaultStrategy: StrategyProfile = {
+  tone: 'friendly',
+  empathyLevel: 75,
+  persistenceLevel: 80,
+  responseDelayMs: 300,
+};
+
+let activeStrategy: StrategyProfile = { ...defaultStrategy };
+
+export function setGlobalStrategy(s: Partial<StrategyProfile>) {
+  activeStrategy = { ...activeStrategy, ...s };
+}
+
+export function getGlobalStrategy(): StrategyProfile {
+  return activeStrategy;
 }
 
 function nowIso() {
@@ -806,11 +832,20 @@ class ConversationEngine {
   private repeatTimer: any = null;
   private ended = false;
   private chain: Promise<any> = Promise.resolve();
+  private strategy: StrategyProfile;
 
   constructor(
     private subscriber: TelephonySubscriber,
     private emit: (e: EngineEvent) => Promise<void>,
-  ) {}
+    strategy?: Partial<StrategyProfile>,
+  ) {
+    this.strategy = { ...activeStrategy, ...(strategy || {}) };
+  }
+
+  // Effective number of menu repeats before giving up (driven by persistence slider)
+  private maxRepeats(): number {
+    return Math.max(1, Math.min(6, 1 + Math.round((this.strategy.persistenceLevel / 100) * 5)));
+  }
 
   async start() {
     await this.enqueue(async () => {
@@ -831,6 +866,9 @@ class ConversationEngine {
   private async line(text: string) {
     if (this.ended) return;
     await this.emit({ type: 'line', text });
+    if (this.strategy.responseDelayMs > 0) {
+      await sleep(this.strategy.responseDelayMs);
+    }
   }
 
   private scheduleRepeat() {
@@ -838,7 +876,7 @@ class ConversationEngine {
     this.repeatTimer = setTimeout(() => {
       if (this.ended) return;
       this.menuRepeats++;
-      if (this.menuRepeats > 3) {
+      if (this.menuRepeats > this.maxRepeats()) {
         this.finish('no_response');
         return;
       }
@@ -962,12 +1000,23 @@ class ConversationEngine {
   }
 
   private greetingText(): string {
-    return `سلام ${this.subscriber.name} عزیز، وقتتون بخیر. از طرف شرکت توزیع نیروی برق استان ایلام با شما صحبت می‌کنم. این تماس به صورت خودکار و رایگان انجام می‌شود.`;
+    const empathetic = this.strategy.empathyLevel >= 50;
+    const opening = empathetic
+      ? 'امیدوارم حالتون خوب باشه و مزاحمتون نشیم.'
+      : 'این تماس اطلاع‌رسانی حساب برق شماست.';
+    return `سلام ${this.subscriber.name} عزیز، وقتتون بخیر. از طرف شرکت توزیع نیروی برق استان ایلام با شما صحبت می‌کنم. ${opening} این تماس به صورت خودکار و رایگان انجام می‌شود.`;
   }
 
   private noticeText(): string {
     const s = this.subscriber;
-    let text = `وضعیت حساب شما را بررسی کردم. مبلغ ${faNumber(s.debt)} ریال از قبض برق شما معوقه است.`;
+    let text = '';
+    if (this.strategy.tone === 'firm' && (s.debt || 0) > 5000000) {
+      text = `به اطلاع می‌رسانم مبلغ ${faNumber(s.debt)} ریال از قبض برق شما معوقه است و طبق ماده ۱۲ آیین‌نامه، در صورت عدم پرداخت، انشعاب شما قابل قطع خواهد بود.`;
+    } else if (this.strategy.tone === 'compromise') {
+      text = `حساب شما را بررسی کردم؛ مبلغ ${faNumber(s.debt)} ریال معوقه دارید. نگران نباشید، برای تسویه راه‌حل‌های منعطفی مثل اقساط داریم.`;
+    } else {
+      text = `وضعیت حساب شما را بررسی کردم. مبلغ ${faNumber(s.debt)} ریال از قبض برق شما معوقه است.`;
+    }
     if (s.region) text += ` منطقه خدماتی: ${s.region}.`;
     if (s.lastPayment) text += ` آخرین پرداخت ثبت‌شده شما مورخ ${s.lastPayment} است.`;
     return text;
@@ -1022,10 +1071,16 @@ class CallSession {
       transport: 'none',
       startedAt: nowIso(),
       aiMode: 'local',
+      tone: activeStrategy.tone,
       transcript: [],
       dtmfLog: [],
     };
     this.engine = new ConversationEngine(subscriber, (e) => this.handleEngineEvent(e));
+  }
+
+  // Re-apply the current strategy profile to a live session's engine (takeover/reset)
+  reapplyStrategy() {
+    (this.engine as any).strategy = { ...activeStrategy };
   }
 
   attachLeg(leg: CallLeg) {
@@ -1207,6 +1262,12 @@ export class TelephonyService {
     return this.wss;
   }
 
+  // Push a new strategy profile into the engine; live sessions pick it up on their next line
+  applyStrategy(s: Partial<StrategyProfile>) {
+    setGlobalStrategy(s);
+    this.calls.forEach((session) => session.reapplyStrategy());
+  }
+
   get sipStatus() {
     return {
       port: this.sip.localPort,
@@ -1231,6 +1292,7 @@ export class TelephonyService {
       service: 'standalone-telephony',
       aiMode: 'local-engine',
       externalServices: 'none',
+      strategy: activeStrategy,
       sip: this.sipStatus,
       gsm: this.gsmStatus,
       activeCalls: Array.from(this.calls.values()).map((c) => ({

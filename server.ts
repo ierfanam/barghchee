@@ -52,6 +52,8 @@ async function startServer() {
     { time: new Date().toISOString(), level: 'INFO', message: 'Standalone telephony engine ready (SIP/RTP + browser phones + GSM modem, no external services).' }
   ];
 
+  let campaignsRun = 0;
+
   // In-memory subscribers database cache
   let subscribersCache: any[] = [
     { id: "sub-1", billId: "1092837465012", name: "محمد رضایی", region: "مرداخ ایلام", phone: "09181234567", debt: 850000, status: "بدهکار", averageConsumption: "340 kWh", lastPayment: "1403/09/15" },
@@ -94,6 +96,45 @@ async function startServer() {
   };
 
   const telephony = new TelephonyService(lookupSubscriber, 5060);
+
+  // ---- AI conversation strategy profile (persisted to disk so tuning survives restarts) ----
+  const STRATEGY_FILE = path.join(process.cwd(), "data", "ai-strategy.json");
+  const defaultStrategy = {
+    tone: "friendly",          // friendly | firm | compromise
+    empathyLevel: 75,          // 0..100
+    persistenceLevel: 80,      // 0..100 -> max menu repeats before hangup
+    responseDelayMs: 300,      // pause between AI sentences
+    autoRetryNoAnswer: false,  // campaign feature: retry unanswered calls once
+  };
+  let aiStrategy: any = { ...defaultStrategy };
+  try {
+    if (nodeRequire("fs").existsSync(STRATEGY_FILE)) {
+      aiStrategy = { ...defaultStrategy, ...JSON.parse(nodeRequire("fs").readFileSync(STRATEGY_FILE, "utf8")) };
+    }
+  } catch { /* fall back to defaults */ }
+  telephony.applyStrategy(aiStrategy);
+
+  app.get("/api/strategy", (req, res) => {
+    res.json({ success: true, strategy: aiStrategy });
+  });
+
+  app.put("/api/strategy", (req, res) => {
+    const b = req.body || {};
+    if (typeof b.tone === "string") aiStrategy.tone = b.tone;
+    if (b.empathyLevel !== undefined) aiStrategy.empathyLevel = Math.max(0, Math.min(100, Number(b.empathyLevel) || 0));
+    if (b.persistenceLevel !== undefined) aiStrategy.persistenceLevel = Math.max(0, Math.min(100, Number(b.persistenceLevel) || 0));
+    if (b.responseDelayMs !== undefined) aiStrategy.responseDelayMs = Math.max(0, Math.min(3000, Number(b.responseDelayMs) || 0));
+    if (b.autoRetryNoAnswer !== undefined) aiStrategy.autoRetryNoAnswer = !!b.autoRetryNoAnswer;
+    try {
+      nodeRequire("fs").mkdirSync(path.dirname(STRATEGY_FILE), { recursive: true });
+      nodeRequire("fs").writeFileSync(STRATEGY_FILE, JSON.stringify(aiStrategy, null, 2));
+      telephony.applyStrategy(aiStrategy);
+      systemLogs.push({ time: new Date().toISOString(), level: "INFO", message: `AI strategy updated: tone=${aiStrategy.tone}, empathy=${aiStrategy.empathyLevel}%, persistence=${aiStrategy.persistenceLevel}%` });
+      res.json({ success: true, strategy: aiStrategy });
+    } catch (e: any) {
+      res.status(500).json({ success: false, error: e.message });
+    }
+  });
 
   app.get("/api/telephony/status", (req, res) => {
     res.json(telephony.getStatus());
@@ -160,20 +201,50 @@ async function startServer() {
     res.json({ success: true, subscriber: newSub });
   });
 
-  app.post("/api/campaigns/run", (req, res) => {
-    const { region, minDebt } = req.body;
-    const targetSubscribers = subscribersCache.filter(s => s.debt >= (Number(minDebt) || 500000));
-    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Automated debt collection campaign started for region: ${region || 'همه مناطق'}, target count: ${targetSubscribers.length}` });
-    
-    // Simulate campaign execution in background
-    setTimeout(() => {
-      systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Automated campaign completed. Calls placed: ${targetSubscribers.length}, Promised payments: ${Math.floor(targetSubscribers.length * 0.7)}` });
-    }, 3000);
+  app.post("/api/campaigns/run", async (req, res) => {
+    const { region, minDebt, transport, maxCalls } = req.body;
+    const targetSubscribers = subscribersCache.filter(s =>
+      s.debt >= (Number(minDebt) || 500000) && (!region || String(s.region).includes(String(region)))
+    );
+    // Cap the campaign queue so the dialer never floods the SIP/GSM lines
+    const queue = targetSubscribers.slice(0, Math.max(1, Number(maxCalls) || 3));
+
+    campaignsRun++;
+    systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Automated debt collection campaign #${campaignsRun} started for region: ${region || 'همه مناطق'}, targets: ${targetSubscribers.length}, queued: ${queue.length}` });
+
+    // Execute real AI calls sequentially in the background and tally live outcomes
+    (async () => {
+      let placed = 0, promised = 0, failed = 0;
+      for (const s of queue) {
+        try {
+          const record = await telephony.startOutboundCall(
+            lookupSubscriber(s.phone) || { name: s.name, phone: s.phone, debt: Number(s.debt) || 0 },
+            { transport: transport || 'browser' }
+          );
+          placed++;
+          const check = setInterval(() => {
+            const rec: any = telephony.getCall(record.id);
+            if (rec && rec.state === 'ended') {
+              clearInterval(check);
+              if (/payment_promised|installment_confirmed|completed/.test(String(rec.outcome))) promised++;
+            }
+          }, 2000);
+          setTimeout(() => clearInterval(check), 10 * 60 * 1000);
+        } catch (e: any) {
+          failed++;
+          systemLogs.push({ time: new Date().toISOString(), level: 'WARN', message: `Campaign call to ${s.phone} skipped: ${e.message}` });
+        }
+        await new Promise((r) => setTimeout(r, 4000)); // pacing between dials
+      }
+      systemLogs.push({ time: new Date().toISOString(), level: 'INFO', message: `Campaign #${campaignsRun} finished. Calls placed: ${placed}, skipped/failed: ${failed}, commitments recorded: ${promised}` });
+    })();
 
     res.json({
       success: true,
-      message: `کمپین وصول مطالبات با موفقیت برای ${targetSubscribers.length} مشترک آغاز شد.`,
+      message: `کمپین وصول مطالبات برای ${targetSubscribers.length} مشترک آغاز شد (${queue.length} تماس در صف اجرا).`,
       targetCount: targetSubscribers.length,
+      queuedCount: queue.length,
+      campaignId: campaignsRun,
       subscribers: targetSubscribers
     });
   });
