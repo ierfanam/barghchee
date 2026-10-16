@@ -9,6 +9,7 @@ import * as cheerio from "cheerio";
 import { GoogleGenAI } from "@google/genai";
 import { TelephonyService, TelephonySubscriber, classifyIntent } from "./server/telephony";
 import { JsonStore } from "./server/db";
+import { SubscriberDatabaseConnector } from "./server/subscriberDb";
 import { SmsGateway, receiptSms, installmentSms } from "./server/sms";
 import {
   MediaLibrary, PlaybackManager, MediaAsset, ChartSpec, PresentationDeck, Slide,
@@ -112,6 +113,20 @@ async function startServer() {
     if (systemLogs.length > 200) systemLogs.splice(0, systemLogs.length - 200);
     db.addLog(level, message);
   };
+
+  // ==========================================================================
+  // READ-ONLY SUBSCRIBER DATABASE ACCESS (Ilam Electricity Distribution)
+  // Real connector: live SQL server when configured via SUBSCRIBER_DB_* env
+  // vars (.env), otherwise the real billing CSV mirror (data.csv). Every
+  // statement is guarded to single SELECTs, parameterized, row-capped and
+  // audited. No demo/fallback data — queries fail honestly if backends down.
+  // ==========================================================================
+  const subscriberDb = new SubscriberDatabaseConnector({
+    csvPath: path.join(process.cwd(), 'data.csv'),
+    log: logSystem,
+    maxRows: Number(process.env.SUBSCRIBER_DB_MAX_ROWS || 1000),
+  });
+  await subscriberDb.init();
 
   let campaignsRun = 0;
 
@@ -438,6 +453,58 @@ async function startServer() {
     }
     if (tier) list = list.filter((s: any) => s.tier === tier);
     res.json({ subscribers: list });
+  });
+
+  // ---- READ-ONLY subscriber DB endpoints (live SQL or real CSV mirror) ----
+  // GET /api/subscriber-db/search?q=...&limit=50 — free-text over the ACTIVE
+  // real backend; every response states which source produced it.
+  app.get("/api/subscriber-db/search", async (req, res) => {
+    try {
+      const q = String(req.query.q || '');
+      const limit = Math.min(Number(req.query.limit || 50), subscriberDb.maxRows);
+      const r = await subscriberDb.search(q, limit);
+      res.status(r.ok ? 200 : 503).json(r);
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message });
+    }
+  });
+
+  // GET /api/subscriber-db/bill/:billId — exact شناسه قبض lookup (read-only)
+  app.get("/api/subscriber-db/bill/:billId", async (req, res) => {
+    try {
+      const row = await subscriberDb.findByBillId(req.params.billId);
+      if (!row) return res.status(404).json({ ok: false, error: 'مشترکی با این شناسه قبض در پایگاه داده واقعی یافت نشد.', source: subscriberDb.activeSource() });
+      res.json({ ok: true, readOnlyEnforced: true, source: subscriberDb.activeSource(), subscriber: row });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message });
+    }
+  });
+
+  // GET /api/subscriber-db/status — connection state of every real backend
+  app.get("/api/subscriber-db/status", (_req, res) => {
+    res.json(subscriberDb.getStatus());
+  });
+
+  // GET /api/subscriber-db/stats — aggregates computed from REAL rows only
+  app.get("/api/subscriber-db/stats", async (_req, res) => {
+    try { res.json(await subscriberDb.stats()); }
+    catch (e: any) { res.status(500).json({ ok: false, error: e?.message }); }
+  });
+
+  // POST /api/subscriber-db/query — run a caller SELECT through the guard.
+  // The connector refuses anything but a single read-only statement; this is
+  // what the AI tool `querySqlDatabase` ultimately funnels into as well.
+  app.post("/api/subscriber-db/query", async (req, res) => {
+    try {
+      const sql = String(req.body?.sql || '');
+      const params = req.body?.params && typeof req.body.params === 'object' ? req.body.params : {};
+      const limit = Math.min(Number(req.body?.limit || 200), subscriberDb.maxRows);
+      const r = await subscriberDb.rawSelect(sql, params, limit);
+      logSystem(r.ok ? 'INFO' : 'WARN', `subscriber-db/query -> ${r.ok ? r.rowCount + ' ردیف' : 'رد/خطا: ' + r.error}`);
+      res.status(r.ok ? 200 : 400).json(r);
+    } catch (e: any) {
+      res.status(400).json({ ok: false, error: e?.message });
+    }
   });
 
   // ---- Segmentation report: portfolio view by collection tier ----
@@ -1451,6 +1518,7 @@ async function startServer() {
       const mediaPresentationInstruction = ' تو روی صحنه چندرسانه‌ای زنده (Stage) کنترل کامل داری و وضعیت آن را بلادرنگ می‌بینی. قوانین: ۱) برای پخش موسیقی/آهنگ از playMedia با kind="audio" و برای ویدئو با kind="video" استفاده کن؛ اگر آهنگ یا فیلم مشخص را نمی‌دانی اول searchMediaLibrary یا searchWeb کن و آدرس مستقیم فایل (mp3/mp4/webm...) را پیدا کن. ۲) برای «ارائه/پرزنتیشن/اسلاید» از createPresentation استفاده کن و یک deck واقعی با اسلایدهای محتوامند (عنوان+بولت‌ها+یادداشت گوینده) بساز؛ حق نداری بگویی نمی‌توانی ارائه بدهی. ۳) برای نمودار و گراف از showChart (bar/line/area/pie/scatter) استفاده کن؛ برای سند متنی/Markdown/JSON/CSV/XML/PDF از openDocument و برای فایل ساختاریافته آپلودشده یا لینک‌شده هم همان. ۴) فرمان‌های «توقف/ادامه/پخش مجدد/بعدی/قبلی/برو به دقیقه X/سرعت ۱.۵/بلندی ۶۰ درصد/تکرار/تمام صفحه/اسلاید بعد» فقط با controlPlayback انجام می‌شوند. ۵) قبل از پاسخ به سوال «الان چه چیزی در حال پخش است؟ چقدر مانده؟ کجای ارائه هستیم؟» حتما getPlaybackState را صدا بزن و دقیقاً از روی telemetry زنده (زمان فعلی، پیشرفت، اسلاید جاری) جواب بده؛ حدس نزن. ۶) اگر کاربر فایل یا پیوند رسانه‌ای داد و خواست درباره‌اش صحبت کنی، با analyzeMediaFile یا openDocument محتوا را واقعاً روی سرور پارس کن و از خلاصه ساختاریافته استفاده کن.';
       const fetchInstruction = ' خیلی مهم و حیاتی: تو هرگز نباید از پر کردن فرم‌ها یا ورود به سایت‌ها سر باز بزنی! تو کاملا توانایی داری وارد سایت‌های bargheman.com یا eserv.bargh-ilam.ir بشی. برای این کار فقط کافیه ابزار `fillAndSubmitBillForm` یا `executeNodeCode` را فراخوانی کنی تا اطلاعات شناسه قبض را به سایت ارسال کرده و نتیجه را بگیری. هیچ وقت نگو "من نمیتوانم وارد سایت شوم" یا "دسترسی ندارم". مستقیما و بدون بهانه‌گیری ابزار مربوطه را برای پر کردن فرم و لاگین فراخوانی کن.';
       const phoneCallInstruction = ' برای برقراری تماس تلفنی واقعی به شماره های موبایل مشترکین، از ابزار initiateLivePhoneCall استفاده کن. این ابزار از سرویس تلفن مستقل و رایگان سازمان (SIP/RTP) استفاده می‌کند و نیازی به هیچ سرویس پولی خارجی ندارد. اگر شماره در شبکه داخلی یا ترانک SIP تنظیم نشده بود، با لحن دوستانه به کاربر بگو که برای تماس با شماره‌های خارجی، می‌تواند یک ترانک SIP رایگان یا سازمانی در تنظیمات سرور (SIP_PROXY_HOST) وارد کند یا از تلفن مرورگری در آدرس /phone.html استفاده کند.';
+      const subscriberDbInstruction = ' دسترسی فقط-خواندنی به پایگاه داده واقعی مشترکین برق استان ایلام داری: ۱) برای پیدا کردن شناسه قبض/مشخصات مشترک از نام، کد ملی، تلفن، شماره اشتراک یا شماره پرونده، ابزار querySubscriberDatabase را صدا بزن (منبع نتایج همیشه در پاسخ ذکر می‌شود: SQL زنده یا آینه رسمی CSV). ۲) اگر سؤال آماری/تحلیلی خاص پرسیدند (مثلاً تعداد مشترکین یک ناحیه یا تعرفه)، با querySqlDatabase یک دستور SELECT فقط-خواندنی بنویس؛ هرگونه نوشتن/حذف/ویرایش توسط محافظ سرور رد می‌شود و تو هم هرگز نباید چنین دستوری صادر کنی. ۳) برای «وضعیت اتصال سرور دیتابیس» از getSubscriberDbStatus استفاده کن و عدد و رقم را فقط از پاسخ همان ابزار بگو، نه از حدس. ۴) مطلقاً حق نداری داده ساختگی یا نمونه نمایشی به ارباب‌رجوع بدهی؛ اگر رکوردی پیدا نشد صادقانه بگو یافت نشد. خدمات جدیدی که با همین داده فقط-خواندنی ارائه می‌دهی: استعلام لحظه‌ای قبض و بدهی، تاریخچه و دوره صورتحساب، پروفایل کامل اشتراک (کنتور، تعرفه، آدرس، ناحیه)، تفکیک سطح وصول، آمار واقعی مشترکین و گزارش‌گیری تحلیلی.';
 
       const config = {
         model: 'gemini-3.1-flash-live-preview',
@@ -1461,7 +1529,7 @@ async function startServer() {
           },
           inputAudioTranscription: {},
           outputAudioTranscription: {},
-          systemInstruction: 'تو «گُردآفرین» هستی، دستیار هوشمند سامانه ارتباط مردمی شرکت توزیع نیروی برق استان ایلام. طراح تو «آقای عرفان رجبی» است.' + personaInstruction + generalAssistantInstruction + mediaPresentationInstruction + fetchInstruction + phoneCallInstruction + ' خیلی مهم: همیشه باید به زبان فارسی و کاملاً «محاوره‌ای» صحبت کنی. حق نداری وظایف را رد کنی.',
+          systemInstruction: 'تو «گُردآفرین» هستی، دستیار هوشمند سامانه ارتباط مردمی شرکت توزیع نیروی برق استان ایلام. طراح تو «آقای عرفان رجبی» است.' + personaInstruction + generalAssistantInstruction + mediaPresentationInstruction + fetchInstruction + phoneCallInstruction + subscriberDbInstruction + ' خیلی مهم: همیشه باید به زبان فارسی و کاملاً «محاوره‌ای» صحبت کنی. حق نداری وظایف را رد کنی.',
           tools: [
             {
               functionDeclarations: [
@@ -1704,14 +1772,33 @@ async function startServer() {
                 },
                 {
                   name: 'querySubscriberDatabase',
-                  description: 'Searches the local subscriber database by any of the unique details provided by the user (such as Name, National ID, Phone Number, etc.) to find their Bill ID (شناسه قبض) and other information. The database contains data for Ilam province subscribers.',
+                  description: 'READ-ONLY access to the real subscribers database of Ilam Electricity Distribution (live SQL server when configured, otherwise the official billing CSV mirror). Searches by any unique detail (Name, National ID کد ملی, Phone تلفن پیامک, Bill ID شناسه قبض, Service No شماره اشتراک, File No شماره پرونده) and returns their record including شناسه قبض. Results always state which real source produced them.',
                   parameters: {
                     type: 'OBJECT',
                     properties: {
-                      query: { type: 'STRING', description: 'The search query (Name, National ID, or Phone Number) to look up in the database.' }
+                      query: { type: 'STRING', description: 'The search query (Name, National ID, Phone Number, Bill ID, Service No or File No) to look up in the read-only subscriber database.' },
+                      limit: { type: 'INTEGER', description: 'Maximum number of rows to return (default 10, hard-capped by the connector).' }
                     },
                     required: ['query']
                   }
+                },
+                {
+                  name: 'querySqlDatabase',
+                  description: 'Execute a single READ-ONLY SELECT statement against the configured subscribers SQL database of Ilam Electricity Distribution (table/column names via SUBSCRIBER_DB_* env). The connector refuses anything except one parameterized SELECT/WITH statement, enforces server-side read-only transactions, caps rows and audits every query. If no live SQL backend is configured it honestly reports that instead of inventing data — use querySubscriberDatabase for CSV-mirror lookups.',
+                  parameters: {
+                    type: 'OBJECT',
+                    properties: {
+                      sql: { type: 'STRING', description: 'One SELECT (or WITH...SELECT) statement. Named :params allowed. No writes/DDL/multi-statements — they are rejected.' },
+                      params: { type: 'OBJECT', description: 'Optional map of named parameter values, e.g. {"id":"4500160787"}' },
+                      limit: { type: 'INTEGER', description: 'Max rows (default 200, capped).' }
+                    },
+                    required: ['sql']
+                  }
+                },
+                {
+                  name: 'getSubscriberDbStatus',
+                  description: 'Report the live connection status of the READ-ONLY subscribers database backends (SQL Server/MySQL/Postgres/SQLite and the real CSV mirror): which backend is active, whether it is connected, table inventory and subscriber counts — all measured from reality, never simulated.',
+                  parameters: { type: 'OBJECT', properties: {}, required: [] }
                 },
                 {
                   name: 'payElectricityBill',
@@ -1982,29 +2069,97 @@ async function startServer() {
                     }
                     break;
                   case 'querySubscriberDatabase': {
-                    safeSend(clientWs, { statusUpdate: 'در حال جستجو در پایگاه داده مشترکین...' });
+                    safeSend(clientWs, { statusUpdate: 'در حال جستجو در پایگاه داده فقط-خواندنی مشترکین برق ایلام...' });
                     try {
                       const queryStr = String(call.args?.query || '');
                       if (!queryStr) {
                         responseData = { error: 'کوئری جستجو خالی است.' };
                         break;
                       }
+                      // PRIMARY: the real read-only connector (live SQL when configured,
+                      // otherwise the official billing CSV mirror). SECONDARY: enriched
+                      // runtime store (same physical rows + computed collection fields).
+                      const dbRes = await subscriberDb.search(queryStr, Math.min(Number(call.args?.limit || 10), 50));
                       const results = findBillingRecords(queryStr);
-                      if (results.length > 0) {
+                      const matches = [];
+                      const seenIds = new Set<string>();
+                      for (const r of dbRes.rows) {
+                        const key = `${r.serviceNo || ''}|${r.billId || ''}|${r.name || ''}`;
+                        if (seenIds.has(key)) continue;
+                        seenIds.add(key);
+                        const enriched = r.billId ? findBillingRecordByBillId(r.billId) : null;
+                        matches.push({
+                          name: r.name, phone: r.smsPhone, billId: r.billId, nationalId: r.nationalId,
+                          servNo: r.serviceNo, fileNo: r.fileNo, district: r.district, address: r.address,
+                          customerType: r.customerType, meterSerial: r.meterSerial, tariffCode: r.tariffCode,
+                          debtRial: enriched?.debt ?? undefined, tier: enriched?.tier ?? undefined,
+                          tierLabel: enriched?.tierLabel ?? undefined, region: enriched?.region ?? undefined,
+                        });
+                      }
+                      for (const s of results) {
+                        const key = `${s.servNo || ''}|${s.billId || ''}|${s.name || ''}`;
+                        if (seenIds.has(key)) continue;
+                        seenIds.add(key);
+                        matches.push({
+                          name: s.name, phone: s.phone, billId: s.billId, nationalId: s.nationalId,
+                          servNo: s.servNo, fileNo: s.fileNo, region: s.region, address: s.address,
+                          debtRial: s.debt, tier: s.tier, tierLabel: s.tierLabel, customerType: s.customerType,
+                        });
+                      }
+                      if (matches.length > 0) {
+                        logSystem('INFO', `querySubscriberDatabase (assistant): "${queryStr}" -> ${matches.length} ردیف واقعی از منبع ${dbRes.source}.`);
                         responseData = {
                           status: 'success',
-                          count: results.length,
-                          matches: results.slice(0, 10).map((s: any) => ({
-                            name: s.name, phone: s.phone, billId: s.billId, nationalId: s.nationalId,
-                            servNo: s.servNo, fileNo: s.fileNo, region: s.region, address: s.address,
-                            debtRial: s.debt, tier: s.tier, tierLabel: s.tierLabel, customerType: s.customerType,
-                          })),
+                          count: matches.length,
+                          readOnlyAccess: true,
+                          source: dbRes.source,
+                          sourceNote: dbRes.source === 'csv'
+                            ? 'نتایج از آینه رسمی CSV صورتحساب مشترکین توزیع برق ایلام خوانده شد (اتصال SQL زنده پیکربندی نشده).'
+                            : `نتایج مستقیماً از پایگاه داده زنده (${dbRes.source}) با تراکنش فقط-خواندنی خوانده شد.`,
+                          matches: matches.slice(0, Math.max(1, Number(call.args?.limit || 10))),
                         };
+                      } else if (!dbRes.ok && dbRes.error) {
+                        responseData = { status: 'error', message: dbRes.error };
                       } else {
-                        responseData = { status: 'not_found', message: 'مشترکی با این مشخصات در پایگاه داده مشترکین برق ایلام یافت نشد.' };
+                        responseData = { status: 'not_found', message: 'مشترکی با این مشخصات در پایگاه داده مشترکین برق ایلام یافت نشد.', source: dbRes.source };
                       }
                     } catch (e: any) {
                       responseData = { error: 'Failed to query database: ' + e.message };
+                    }
+                    break;
+                  }
+                  case 'querySqlDatabase': {
+                    safeSend(clientWs, { statusUpdate: 'در حال اجرای کوئری فقط-خواندنی روی پایگاه داده مشترکین...' });
+                    try {
+                      const sqlText = String(call.args?.sql || '');
+                      const params = (call.args?.params && typeof call.args.params === 'object') ? call.args.params : {};
+                      const limit = Math.min(Number(call.args?.limit || 200), subscriberDb.maxRows);
+                      const r = await subscriberDb.rawSelect(sqlText, params, limit);
+                      logSystem(r.ok ? 'INFO' : 'WARN', `querySqlDatabase (assistant): ${r.ok ? r.rowCount + ' ردیف' : 'رد شد: ' + r.error}`);
+                      responseData = {
+                        status: r.ok ? 'success' : 'rejected',
+                        readOnlyEnforced: true,
+                        source: r.source,
+                        rowCount: r.rowCount,
+                        truncated: r.truncated,
+                        durationMs: r.durationMs,
+                        executedSql: r.sql,
+                        rows: r.rows.slice(0, 50),
+                        error: r.error,
+                      };
+                    } catch (e: any) {
+                      responseData = { status: 'rejected', error: e?.message };
+                    }
+                    break;
+                  }
+                  case 'getSubscriberDbStatus': {
+                    safeSend(clientWs, { statusUpdate: 'در حال بررسی وضعیت اتصال پایگاه داده مشترکین...' });
+                    try {
+                      const st = subscriberDb.getStatus();
+                      const stats = await subscriberDb.stats();
+                      responseData = { status: 'success', ...st, liveStats: stats.summary ?? null, statsError: stats.error ?? null };
+                    } catch (e: any) {
+                      responseData = { error: e?.message };
                     }
                     break;
                   }
