@@ -1429,6 +1429,25 @@ export class TelephonyService {
     if (this.externalSink) { try { this.externalSink(obj); } catch {} }
   }
 
+  // Lightweight in-memory cache of recent call records so UI clients can hydrate
+  // live campaign calls (name/phone/debt) from 'callEvent' messages without a DB round-trip.
+  private recordCache = new Map<string, any>();
+  private recordCacheOrder: string[] = [];
+  getCachedRecord(callId: string): any | null {
+    return this.recordCache.get(callId) || null;
+  }
+  private rememberRecord(record: any) {
+    try {
+      const slim = { id: record.id, name: record.subscriber?.name, phone: record.subscriber?.phone, debt: record.subscriber?.debt, transport: record.transport };
+      this.recordCache.set(record.id, slim);
+      this.recordCacheOrder.push(record.id);
+      while (this.recordCacheOrder.length > 200) {
+        const old = this.recordCacheOrder.shift();
+        if (old) this.recordCache.delete(old);
+      }
+    } catch {}
+  }
+
   // External sink so the HTTP server can mirror engine events onto other WS channels
   // (e.g. the /live dashboard channel used by the main UI).
   private externalSink: ((obj: any) => void) | null = null;
@@ -1696,9 +1715,16 @@ export class TelephonyService {
   }
 
   private wireSession(session: CallSession) {
+    this.rememberRecord(session.record);
     session.llmIntentFn = (this as any).llmIntentFn || null;
     session.onEvent = (e) => {
-      this.broadcast({ type: 'callEvent', callId: session.record.id, ...e });
+      const enriched: any = { type: 'callEvent', callId: session.record.id, ...e };
+      // Attach minimal identity so dashboards can render campaign calls live.
+      enriched.name = session.record.subscriber?.name;
+      enriched.phone = session.record.subscriber?.phone;
+      enriched.debt = session.record.subscriber?.debt;
+      enriched.transport = (session.record as any).transport;
+      this.broadcast(enriched);
       if (e.event === 'ended') this.finalizeCall(session);
     };
     session.onTranscript = (line) =>

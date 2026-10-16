@@ -150,7 +150,7 @@ async function startServer() {
   smsGateway.attachModem((telephony as any).gsmModemInstance || null);
 
   // ---- LLM intent understanding hook (Gemini when GEMINI_API_KEY is available) ----
-  const llmIntentClassify = async (text: string, subscriber: TelephonySubscriber): Promise<string | null> {
+  const llmIntentClassify = async (text: string, subscriber: TelephonySubscriber): Promise<string | null> => {
     if (!process.env.GEMINI_API_KEY) return null;
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -292,7 +292,7 @@ async function startServer() {
     if (!sub.phone) return res.status(400).json({ error: "phone_required" });
     try {
       const record = await telephony.startOutboundCall(sub, { transport: transport || 'sip', phoneId });
-      logSystem("INFO", `Outbound AI call initiated to ${sub.phone} (${sub.name}) via standalone telephony.` });
+      logSystem("INFO", `Outbound AI call initiated to ${sub.phone} (${sub.name}) via standalone telephony.`);
       res.json({ success: true, call: record });
     } catch (e: any) {
       res.status(500).json({ success: false, error: e.message });
@@ -1355,7 +1355,7 @@ async function startServer() {
         safeSend(clientWs, { error: 'ارتباط با هوش مصنوعی برقرار نشد: ' + errorMsg });
       }
     }
- );
+  });
 }
 
 startServer();
