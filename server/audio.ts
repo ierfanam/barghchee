@@ -88,6 +88,10 @@ export function normalizePersian(input: string): string {
     .replace(/ك/g, 'ک')
     .replace(/ي/g, 'ی')
     .replace(/ئ/g, 'ی')
-    .replace(/‌/g, '')
+    .replace(/ة/g, 'ه')
+    .replace(/[إأآٱ]/g, 'ا')
+    .replace(/‌/g, '')   // remove ZWNJ (zero-width non-joiner)
+    .replace(/[،؛]/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }

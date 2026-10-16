@@ -58,8 +58,10 @@ export function encodeWav(pcm: Buffer, sampleRate: number): Buffer {
 
 // ---- Energy-based Voice Activity Detection ----
 // Segments a continuous PCM stream into utterances using adaptive RMS thresholds.
+// All state is instance-local (no module globals) so concurrent calls never share buffers.
 export class UtteranceSegmenter {
-  private buffer: Buffer[] = [];
+  private carry: Buffer = Buffer.alloc(0);   // sub-frame remainder between pushes
+  private frames: Buffer[] = [];             // captured frames of the in-progress utterance
   private silentMs = 0;
   private voicedMs = 0;
   private started = false;
@@ -67,6 +69,8 @@ export class UtteranceSegmenter {
   private readonly silenceHoldMs: number;
   private readonly minVoiceMs: number;
   private readonly maxUtteranceMs: number;
+  private readonly preRollFrames: number;    // small lead-in so first syllable isn't clipped
+  private preRoll: Buffer[] = [];
   private noiseFloor = 150; // adaptive RMS threshold (int16 units)
 
   constructor(opts: { sampleRate?: number; silenceHoldMs?: number; minVoiceMs?: number; maxUtteranceMs?: number } = {}) {
@@ -74,6 +78,7 @@ export class UtteranceSegmenter {
     this.silenceHoldMs = opts.silenceHoldMs ?? 700;
     this.minVoiceMs = opts.minVoiceMs ?? 300;
     this.maxUtteranceMs = opts.maxUtteranceMs ?? 12000;
+    this.preRollFrames = 5; // ~100 ms of lead-in audio
   }
 
   private frameBytes(sampleRate: number) {
@@ -83,77 +88,67 @@ export class UtteranceSegmenter {
   // Feed raw PCM16k; returns completed utterance buffers (PCM16k) when endpoint detected.
   push(pcm: Buffer, sampleRate = 16000): Buffer[] {
     const out: Buffer[] = [];
-    this.buffer.push(pcm);
-    let fb = this.frameBytes(sampleRate);
-    while (this.buffer.reduce((a, b) => a + b.length, 0) >= fb) {
-      // Flatten lazily
-      let data = Buffer.concat(this.buffer);
-      const frame = data.subarray(0, fb);
-      this.buffer = [data.subarray(fb)];
+    const fb = this.frameBytes(sampleRate);
+    let data = this.carry.length ? Buffer.concat([this.carry, pcm]) : Buffer.from(pcm);
+    this.carry = Buffer.alloc(0);
+
+    let offset = 0;
+    while (data.length - offset >= fb) {
+      const frame = data.subarray(offset, offset + fb);
+      offset += fb;
 
       const rms = frameRms(frame);
       const threshold = Math.max(220, this.noiseFloor * 3.2);
+
       if (rms > threshold) {
         this.voicedMs += this.frameMs;
         this.silentMs = 0;
-        if (!this.started && this.voicedMs >= this.minVoiceMs) this.started = true;
-        if (this.started) {
-          // keep audio in `data` accumulation below
+        if (!this.started && this.voicedMs >= this.minVoiceMs) {
+          this.started = true;
+          // include the short lead-in captured before onset detection
+          for (const p of this.preRoll) this.frames.push(p);
+          this.preRoll = [];
         }
+        if (this.started) this.frames.push(Buffer.from(frame));
       } else {
         this.silentMs += this.frameMs;
         if (!this.started) {
-          // adapt noise floor during leading silence
+          // adapt noise floor during leading silence and keep a tiny pre-roll
           this.noiseFloor = this.noiseFloor * 0.98 + rms * 0.02;
-          data = Buffer.alloc(0); // discard pre-speech frames
-          this.buffer = [data];
+          this.preRoll.push(Buffer.from(frame));
+          if (this.preRoll.length > this.preRollFrames) this.preRoll.shift();
           continue;
         }
       }
 
       const totalMs = this.voicedMs + this.silentMs;
       if (this.started && (this.silentMs >= this.silenceHoldMs || totalMs >= this.maxUtteranceMs)) {
-        // Emit everything captured since speech started
-        const all = Buffer.concat(collectVoiced());
-        if (all.length > 0) out.push(all);
+        if (this.frames.length > 0) out.push(Buffer.concat(this.frames));
         this.reset();
-      } else if (this.started) {
-        rememberVoiced(frame);
       }
-      void totalMs;
     }
+    if (offset < data.length) this.carry = Buffer.from(data.subarray(offset));
     return out;
   }
 
   private reset() {
-    this.buffer = [];
+    this.frames = [];
     this.silentMs = 0;
     this.voicedMs = 0;
     this.started = false;
-    pendingFrames = [];
+    this.preRoll = [];
   }
 
+  // Force-end the current utterance (e.g. call teardown). Returns remaining audio or null.
   flush(): Buffer | null {
-    if (this.started && pendingFrames.length > 0) {
-      const all = Buffer.concat(pendingFrames);
+    if (this.started && this.frames.length > 0) {
+      const all = Buffer.concat(this.frames);
       this.reset();
       return all;
     }
     this.reset();
     return null;
   }
-}
-
-// Frame scratch storage kept per-segmenter instance via closure-free approach:
-// Using module-level arrays would leak across concurrent calls, so we attach
-// frames to a WeakMap keyed by segmenter instance instead.
-const framesMap = new WeakMap<UtteranceSegmenter, Buffer[]>();
-let pendingFrames: Buffer[] = []; // bound to the segmenter currently processing
-function rememberVoiced(frame: Buffer) {
-  pendingFrames.push(Buffer.from(frame));
-}
-function collectVoiced(): Buffer[] {
-  return pendingFrames;
 }
 
 export function frameRms(buf: Buffer): number {
@@ -227,60 +222,58 @@ async function recognizeWithOpenAiApi(wav: Buffer): Promise<AsrResult | null> {
 }
 
 // High-level streaming recognizer wired into CallSession.onCallerAudio.
+// Each call session gets its OWN instance — all VAD/segmentation state is per-instance.
 export class CallerSpeechRecognizer {
-  private segmenter = new SegmenterHolder();
+  private segmenter = new UtteranceSegmenter();
   onUtterance: ((text: string) => void) | null = null;
   private busy = false;
+  private queue: Buffer[] = [];
 
   async acceptPcm(pcm16k: Buffer): Promise<void> {
     if (currentBackend() === 'none') return;
-    const utterances = this.segmenter.seg.push(pcm16k, 16000);
+    const utterances = this.segmenter.push(pcm16k, 16000);
     for (const u of utterances) await this.recognize(u);
   }
 
+  // Flush any trailing speech buffer (call teardown).
+  async flush(): Promise<void> {
+    const tail = this.segmenter.flush();
+    if (tail) await this.recognize(tail);
+  }
+
   private async recognize(pcm: Buffer) {
-    if (this.busy) return; // never overlap transcriptions
+    if (this.busy) {
+      // serialize instead of dropping: keep at most a few pending utterances
+      if (this.queue.length < 3) this.queue.push(pcm);
+      return;
+    }
     this.busy = true;
     try {
-      const wav = encodeWav(pcm, 16000);
-      let result: AsrResult | null = null;
-      const backend = currentBackend();
-      if (backend === 'whisper-cpp') {
-        const tmp = path.join(os.tmpdir(), `gdm-asr-${Date.now()}.wav`);
-        fs.writeFileSync(tmp, wav);
-        result = await recognizeWithWhisperCpp(tmp);
-        try { fs.unlinkSync(tmp); } catch {}
-        try { fs.unlinkSync(tmp + '.txt'); } catch {}
-      } else if (backend === 'openai-api') {
-        result = await recognizeWithOpenAiApi(wav);
-      }
-      if (result && result.text && this.onUtterance) {
-        this.onUtterance(result.text);
+      await this.transcribeOne(pcm);
+      while (this.queue.length > 0) {
+        const next = this.queue.shift()!;
+        await this.transcribeOne(next);
       }
     } finally {
       this.busy = false;
     }
   }
-}
 
-// Small holder to give each recognizer its own segmenter state (avoids the
-// module-level pendingFrames pitfall above by rebinding it around push()).
-class SegmenterHolder {
-  seg: UtteranceSegmenter;
-  constructor() {
-    this.seg = new UtteranceSegmenter();
-    const origPush = this.seg.push.bind(this.seg);
-    (this.seg as any).push = (pcm: Buffer, sr?: number) => {
-      pendingFrames = framesFor(this.seg);
-      const r = origPush(pcm, sr);
-      return r;
-    };
+  private async transcribeOne(pcm: Buffer) {
+    const wav = encodeWav(pcm, 16000);
+    let result: AsrResult | null = null;
+    const backend = currentBackend();
+    if (backend === 'whisper-cpp') {
+      const tmp = path.join(os.tmpdir(), `gdm-asr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.wav`);
+      fs.writeFileSync(tmp, wav);
+      result = await recognizeWithWhisperCpp(tmp);
+      try { fs.unlinkSync(tmp); } catch {}
+      try { fs.unlinkSync(tmp + '.txt'); } catch {}
+    } else if (backend === 'openai-api') {
+      result = await recognizeWithOpenAiApi(wav);
+    }
+    if (result && result.text && this.onUtterance) {
+      this.onUtterance(result.text);
+    }
   }
-}
-
-const framesStore = new Map<object, Buffer[]>();
-function framesFor(seg: UtteranceSegmenter): Buffer[] {
-  let arr = framesStore.get(seg);
-  if (!arr) { arr = []; framesStore.set(seg, arr); }
-  return arr;
 }
