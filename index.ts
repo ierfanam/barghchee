@@ -33,7 +33,7 @@ export class GdmLiveAudio extends LitElement {
   @state() aiLogs: {time: string, message: string}[] = [];
 
   // PBX Console & Web Agent Simulation Properties
-  @state() activeTab: 'monitor' | 'subscribers' | 'strategy' | 'webagent' | 'logs' = 'monitor';
+  @state() activeTab: 'monitor' | 'subscribers' | 'strategy' | 'reports' | 'webagent' | 'logs' = 'monitor';
   @state() subscribersList: any[] = [];
   @state() searchQuery: string = '';
   @state() systemLogsList: any[] = [];
@@ -46,10 +46,22 @@ export class GdmLiveAudio extends LitElement {
   @state() empathyLevel: number = 75;
   @state() persistenceLevel: number = 80;
   @state() responseDelay: number = 300;
+  @state() strategyLanguage: string = 'fa';
+  @state() strategyLlmEnabled: boolean = true;
+  @state() strategyAutoRetry: boolean = false;
+  @state() strategySaveStatus: string = '';
+  @state() manualSmsTo: string = '';
+  @state() manualSmsBody: string = '';
+  @state() kpiData: any = null;
+  @state() commitmentsList: any[] = [];
+  @state() followUpTasks: any[] = [];
+  @state() smsLogList: any[] = [];
   @state() isHumanTakeoverActive = false;
   @state() humanTextResponse = '';
   @state() isCampaignRunning = false;
   @state() campaignStatus = '';
+  @state() campaignRegion = '';
+  @state() campaignMinDebt: number = 500000;
   @state() isConsoleOpen = false;
   @state() telephonyStatus: any = null;
   @state() callHistory: any[] = [];
@@ -58,9 +70,9 @@ export class GdmLiveAudio extends LitElement {
 
   private session: WebSocket | null = null;
   private inputAudioContext = new (window.AudioContext ||
-    window.webkitAudioContext)({sampleRate: 16000});
+    (window as any).webkitAudioContext)({sampleRate: 16000});
   private outputAudioContext = new (window.AudioContext ||
-    window.webkitAudioContext)({sampleRate: 24000});
+    (window as any).webkitAudioContext)({sampleRate: 24000});
   @state() inputNode = this.inputAudioContext.createGain();
   @state() outputNode = this.outputAudioContext.createGain();
   private nextStartTime = 0;
@@ -1645,7 +1657,7 @@ export class GdmLiveAudio extends LitElement {
   }
 
   private playClickSound() {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     const bufferSize = ctx.sampleRate * 0.05;
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const data = buffer.getChannelData(0);
@@ -1712,6 +1724,10 @@ export class GdmLiveAudio extends LitElement {
     this.fetchSubscribers();
     this.fetchDiagnostics();
     this.fetchSystemLogs();
+    this.fetchStrategy();
+    this.fetchKpiReports();
+    this.fetchCommitments();
+    this.fetchSmsLog();
     this.initTelephony();
     this.fetchTelephonyStatus();
 
@@ -1771,6 +1787,150 @@ export class GdmLiveAudio extends LitElement {
       }
     } catch (e) {
       // Ignore transient fetch errors
+    }
+  }
+
+  // ---- AI strategy: load from server (persisted profile drives the live conversation engine) ----
+  private async fetchStrategy() {
+    try {
+      const res = await fetch('/api/strategy');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.strategy) {
+        const s = data.strategy;
+        this.customToneStrategy = s.tone || 'friendly';
+        this.empathyLevel = Number(s.empathyLevel ?? 75);
+        this.persistenceLevel = Number(s.persistenceLevel ?? 80);
+        this.responseDelay = Number(s.responseDelayMs ?? 300);
+        this.strategyLanguage = s.language || 'fa';
+        this.strategyLlmEnabled = s.llmEnabled !== false;
+        this.strategyAutoRetry = !!s.autoRetryNoAnswer;
+      }
+    } catch (e) {
+      // Ignore transient fetch errors
+    }
+  }
+
+  private strategyDebounceTimer: any = null;
+  private lastPushedStrategy = '';
+
+  private pushStrategyPayload() {
+    return {
+      tone: this.customToneStrategy,
+      empathyLevel: Number(this.empathyLevel),
+      persistenceLevel: Number(this.persistenceLevel),
+      responseDelayMs: Number(this.responseDelay),
+      autoRetryNoAnswer: !!this.strategyAutoRetry,
+      language: this.strategyLanguage,
+      llmEnabled: !!this.strategyLlmEnabled,
+    };
+  }
+
+  // Debounced hot-apply: sliders update the live IVR engine immediately after the user settles
+  private saveStrategy(showStatus = true) {
+    const payload = this.pushStrategyPayload();
+    const key = JSON.stringify(payload);
+    if (key === this.lastPushedStrategy) return;
+    if (this.strategyDebounceTimer) clearTimeout(this.strategyDebounceTimer);
+    if (showStatus) this.strategySaveStatus = 'در حال اعمال...';
+    this.strategyDebounceTimer = setTimeout(async () => {
+      try {
+        const res = await fetch('/api/strategy', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        this.lastPushedStrategy = key;
+        this.strategySaveStatus = `✅ ذخیره و اعمال زنده روی موتور مکالمه (${new Date().toLocaleTimeString('fa-IR')})`;
+      } catch (e: any) {
+        this.strategySaveStatus = `⚠️ خطا در ذخیره استراتژی: ${e.message}`;
+      }
+      setTimeout(() => { this.strategySaveStatus = ''; }, 4000);
+    }, 350);
+  }
+
+  // ---- KPI reports dashboard ----
+  private async fetchKpiReports() {
+    try {
+      const res = await fetch('/api/reports/kpi?hours=168');
+      if (!res.ok) return;
+      this.kpiData = await res.json();
+    } catch (e) {
+      // Ignore transient fetch errors
+    }
+  }
+
+  private async fetchCommitments() {
+    try {
+      const res = await fetch('/api/commitments');
+      if (!res.ok) return;
+      const data = await res.json();
+      this.commitmentsList = data.commitments || [];
+      this.followUpTasks = data.tasks || [];
+    } catch (e) {
+      // Ignore transient fetch errors
+    }
+  }
+
+  private async fulfillCommitment(id: string) {
+    try {
+      await fetch(`/api/commitments/${id}/fulfill`, { method: 'POST' });
+      await this.fetchCommitments();
+      await this.fetchKpiReports();
+    } catch (e) { /* ignore */ }
+  }
+
+  private async toggleTask(id: string) {
+    try {
+      await fetch(`/api/tasks/${id}/toggle`, { method: 'POST' });
+      await this.fetchCommitments();
+    } catch (e) { /* ignore */ }
+  }
+
+  private async fetchSmsLog() {
+    try {
+      const res = await fetch('/api/sms');
+      if (!res.ok) return;
+      const data = await res.json();
+      this.smsLogList = data.messages || [];
+    } catch (e) {
+      // Ignore transient fetch errors
+    }
+  }
+
+  private async sendManualSms(to: string, body: string) {
+    if (!to.trim() || !body.trim()) return;
+    try {
+      await fetch('/api/sms/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: to.trim(), body: body.trim(), kind: 'reminder' }),
+      });
+      await this.fetchSmsLog();
+    } catch (e) { /* ignore */ }
+  }
+
+  private async runCampaign(region: string, minDebt: number) {
+    this.isCampaignRunning = true;
+    this.campaignStatus = 'در حال اجرای کمپین وصول مطالبات...';
+    try {
+      const res = await fetch('/api/campaigns/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ region, minDebt, maxCalls: 5 }),
+      });
+      const data = await res.json();
+      this.campaignStatus = data?.message || 'کمپین آغاز شد.';
+      const poll = setInterval(async () => {
+        await this.fetchKpiReports();
+        await this.fetchCommitments();
+        await this.fetchSmsLog();
+      }, 5000);
+      setTimeout(() => { clearInterval(poll); this.isCampaignRunning = false; }, 60000);
+    } catch (e: any) {
+      this.campaignStatus = `خطا در اجرای کمپین: ${e.message}`;
+      this.isCampaignRunning = false;
     }
   }
 
@@ -1899,6 +2059,19 @@ export class GdmLiveAudio extends LitElement {
           }
           if (msg.type === 'callEvent' && msg.event === 'ended') {
             this.fetchTelephonyStatus();
+            this.fetchKpiReports();
+            this.fetchCommitments();
+          }
+          // Campaign calls that the operator is not watching directly: keep the live feed populated
+          if (msg.type === 'callEvent' && !this.activeOutboundCall && ['ringing', 'dialing', 'connected'].includes(msg.event)) {
+            const rec: any = msg.name ? msg : null; // server enriches callEvent with name/phone/debt
+            if (rec) {
+              this.activeOutboundCall = {
+                callId: msg.callId, name: rec.name || 'مشترک', phone: rec.phone || '', debt: Number(rec.debt) || 0,
+                status: msg.event === 'connected' ? 'در حال گفتگوی زنده' : 'در حال زنگ زدن...', state: msg.event,
+                transport: rec.transport || 'sip', aiMode: 'local-engine', conversation: [],
+              };
+            }
           }
         } catch (e) {}
       };
@@ -2522,6 +2695,28 @@ export class GdmLiveAudio extends LitElement {
             برای برقراری تماس واقعی با اپراتور هوشمند، از تب پایگاه مشترکین دکمه «برقراری تماس» را بزنید.
           </div>
         `}
+
+        <!-- Debt-collection campaign dialer -->
+        <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.08); margin: 12px 0;" />
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <span style="font-size: 0.75rem; font-weight: bold; color: rgba(255,255,255,0.85);">📣 کمپین خودکار وصول مطالبات (Dialer)</span>
+          <div style="display: flex; gap: 6px;">
+            <input class="search-input" placeholder="فیلتر منطقه (اختیاری)" style="flex: 1;" .value=${this.campaignRegion} @input=${(e: any) => this.campaignRegion = e.target.value} />
+            <select class="search-input" style="flex: 0 0 40%;" .value=${String(this.campaignMinDebt)} @change=${(e: any) => this.campaignMinDebt = Number(e.target.value)}>
+              <option value="500000">بدهی ≥ ۵۰ هزار تومان</option>
+              <option value="5000000">بدهی ≥ ۵۰۰ هزار تومان</option>
+              <option value="10000000">بدهی ≥ ۱ میلیون تومان</option>
+            </select>
+          </div>
+          <button class="sub-action-btn" style="width: 100%; padding: 9px 0; font-size: 0.78rem;" ?disabled=${this.isCampaignRunning} @click=${() => this.runCampaign(this.campaignRegion, this.campaignMinDebt)}>
+            ${this.isCampaignRunning ? '⏳ کمپین در حال اجراست...' : '🚀 اجرای کمپین تماس انبوه AI'}
+          </button>
+          ${this.campaignStatus ? html`
+            <div style="font-size: 0.7rem; color: #fbbf24; background: rgba(251,191,36,0.08); border: 1px solid rgba(251,191,36,0.2); padding: 7px 10px; border-radius: 8px; line-height: 1.6;">
+              ${this.campaignStatus}
+            </div>
+          ` : ''}
+        </div>
       </div>
     `;
   }
@@ -2592,7 +2787,7 @@ export class GdmLiveAudio extends LitElement {
             <span>میزان همدلی هوش مصنوعی (Empathy Level)</span>
             <span>${this.empathyLevel}٪</span>
           </label>
-          <input type="range" min="0" max="100" class="custom-range-slider" .value=${this.empathyLevel} @input=${(e: any) => this.empathyLevel = e.target.value} />
+          <input type="range" min="0" max="100" class="custom-range-slider" .value=${String(this.empathyLevel)} @input=${(e: any) => { this.empathyLevel = Number(e.target.value); }} @change=${() => this.saveStrategy()} />
         </div>
 
         <div class="slider-group">
@@ -2600,35 +2795,164 @@ export class GdmLiveAudio extends LitElement {
             <span>میزان پافشاری و پیگیری (Persistence)</span>
             <span>${this.persistenceLevel}٪</span>
           </label>
-          <input type="range" min="0" max="100" class="custom-range-slider" .value=${this.persistenceLevel} @input=${(e: any) => this.persistenceLevel = e.target.value} />
+          <input type="range" min="0" max="100" class="custom-range-slider" .value=${String(this.persistenceLevel)} @input=${(e: any) => { this.persistenceLevel = Number(e.target.value); }} @change=${() => this.saveStrategy()} />
         </div>
 
         <div class="slider-group">
           <label class="slider-label">
-            <span>تأخیر پاسخ شبیه‌سازی‌شده (Latency)</span>
+            <span>تأخیر پاسخ بین جملات AI (Latency)</span>
             <span>${this.responseDelay} میلی‌ثانیه</span>
           </label>
-          <input type="range" min="100" max="1500" step="50" class="custom-range-slider" .value=${this.responseDelay} @input=${(e: any) => this.responseDelay = e.target.value} />
+          <input type="range" min="100" max="1500" step="50" class="custom-range-slider" .value=${String(this.responseDelay)} @input=${(e: any) => { this.responseDelay = Number(e.target.value); }} @change=${() => this.saveStrategy()} />
         </div>
 
         <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.08); margin: 10px 0;" />
 
         <div>
           <label class="slider-label" style="margin-bottom: 6px;">لحن استراتژیک پیش‌فرض بر اساس میزان بدهی</label>
-          <select class="search-input" style="padding: 8px 12px; font-size: 0.8rem;" .value=${this.customToneStrategy} @change=${(e: any) => this.customToneStrategy = e.target.value}>
+          <select class="search-input" style="padding: 8px 12px; font-size: 0.8rem;" .value=${this.customToneStrategy} @change=${(e: any) => { this.customToneStrategy = e.target.value; this.saveStrategy(); }}>
             <option value="friendly">دوستانه و ترغیب‌کننده (کمتر از ۵ میلیون ریال)</option>
             <option value="firm">جدی و قاطع با ارجاع به قوانین (بیشتر از ۵ میلیون ریال)</option>
             <option value="compromise">انعطاف‌پذیر با ارائه تخفیف و قسط‌بندی (بدهکاران باسابقه)</option>
           </select>
         </div>
 
+        <div>
+          <label class="slider-label" style="margin-bottom: 6px;">زبان IVR (دوزبانه / چندزبانه)</label>
+          <select class="search-input" style="padding: 8px 12px; font-size: 0.8rem;" .value=${this.strategyLanguage} @change=${(e: any) => { this.strategyLanguage = e.target.value; this.saveStrategy(); }}>
+            <option value="fa">فارسی</option>
+            <option value="az">فارسی + ترکی آذربایجانی (دوزبانه)</option>
+            <option value="ar">فارسی + عربی</option>
+            <option value="en">فارسی + انگلیسی</option>
+          </select>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 0.78rem; color: rgba(255,255,255,0.75); cursor: pointer;">
+            <input type="checkbox" .checked=${this.strategyLlmEnabled} @change=${(e: any) => { this.strategyLlmEnabled = e.target.checked; this.saveStrategy(); }} />
+            فعال‌سازی درک زبان طبیعی با LLM (Gemini fallback برای نیت‌های مبهم)
+          </label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 0.78rem; color: rgba(255,255,255,0.75); cursor: pointer;">
+            <input type="checkbox" .checked=${this.strategyAutoRetry} @change=${(e: any) => { this.strategyAutoRetry = e.target.checked; this.saveStrategy(); }} />
+            تلاش مجدد خودکار برای تماس‌های بی‌پاسخ کمپین
+          </label>
+        </div>
+
+        <button class="sub-action-btn" style="width: 100%; padding: 9px 0; font-size: 0.78rem;" @click=${() => this.saveStrategy(false)}>
+          💾 ذخیره و اعمال فوری استراتژی روی موتور مکالمه
+        </button>
+
+        ${this.strategySaveStatus ? html`
+          <div style="font-size: 0.72rem; color: #00e5ff; background: rgba(0,229,255,0.08); border: 1px solid rgba(0,229,255,0.25); padding: 8px 10px; border-radius: 8px;">
+            ${this.strategySaveStatus}
+          </div>
+        ` : ''}
+
         <div style="font-size: 0.72rem; color: rgba(255,255,255,0.5); line-height: 1.6; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.03);">
-          💡 <strong>نکته استراتژیک:</strong> هوش مصنوعی صوتی گردآفرین به صورت هوشمند بر اساس میزان بدهی، منطقه و رفتار مخاطب لحن صدای خود را تغییر داده و مکانیزم تعاملی را تنظیم می‌نماید.
+          💡 تمام تغییرات این پنل بلافاصله روی تماس‌های زنده IVR اعمال (hot-swap) و به صورت ماندگار در سرور ذخیره می‌شوند؛ پافشاری تعداد تکرار منو، همدلی/لحن متن سلام و اخطارها، و تأخیر فاصله جملات را کنترل می‌کند.
         </div>
       </div>
     `;
   }
 
+  private renderReportsTab() {
+    const k = this.kpiData;
+    const t = k?.totals || {};
+    const fmt = (n: number) => (Number(n) || 0).toLocaleString('fa-IR');
+    const outcomeLabels: Record<string, string> = {
+      paymentPromised: '💰 قول پرداخت', installmentConfirmed: '🗓 قسط‌بندی', completed: '✅ تکمیل‌شده',
+      noAnswer: '📵 بی‌پاسخ', busy: '⏳ اشغال', declined: '❌ امتناع',
+      operatorTransfer: '👤 انتقال به اپراتور', other: 'ℹ️ سایر',
+    };
+    const card = (title: string, value: string, accent: string) => html`
+      <div style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px;">
+        <span style="font-size: 0.65rem; color: rgba(255,255,255,0.5);">${title}</span>
+        <span style="font-size: 1.05rem; font-weight: bold; color: ${accent};">${value}</span>
+      </div>
+    `;
+    return html`
+      <div style="display: flex; flex-direction: column; gap: 14px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-size: 0.8rem; font-weight: bold; color: rgba(255,255,255,0.85);">📊 داشبورد شاخص‌های عملکرد (KPI)</span>
+          <div style="display: flex; gap: 6px;">
+            <button class="sub-action-btn" style="padding: 5px 10px; font-size: 0.7rem;" @click=${() => { this.fetchKpiReports(); this.fetchCommitments(); this.fetchSmsLog(); }}>🔄 بروزرسانی</button>
+            <a href="/api/reports/export.csv" download style="text-decoration: none;"><button class="sub-action-btn" style="padding: 5px 10px; font-size: 0.7rem;">⬇️ خروجی CSV</button></a>
+          </div>
+        </div>
+
+        ${!k ? html`<div style="font-size: 0.75rem; color: rgba(255,255,255,0.4);">در حال دریافت گزارش‌ها...</div>` : html`
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
+            ${card('کل تماس‌ها (۷ روز)', fmt(t.calls), '#00e5ff')}
+            ${card('نرخ اتصال', `${fmt(t.connectionRate)}٪`, '#4ade80')}
+            ${card('میانگین مدت تماس', `${fmt(t.avgDurationSec)} ثانیه`, '#a78bfa')}
+            ${card('تعهدات پرداخت', fmt(t.commitments), '#fbbf24')}
+            ${card('مبلغ قول داده‌شده', `${fmt(t.promisedAmount)} ریال`, '#fb7185')}
+            ${card('نرخ وصول', `${fmt(t.debtCollectionRate)}٪`, '#34d399')}
+          </div>
+
+          <div style="font-size: 0.72rem; color: rgba(255,255,255,0.6); line-height: 1.8; background: rgba(0,0,0,0.18); padding: 10px; border-radius: 8px;">
+            <strong style="color: rgba(255,255,255,0.85);">نتایج تماس‌ها:</strong><br/>
+            ${Object.entries((k.outcomes || {}) as Record<string, number>).map(([name, count]) => html`
+              <span style="margin-left: 10px; display: inline-block;">${outcomeLabels[name] || name}: ${fmt(count)}</span>
+            `)}
+          </div>
+
+          <div style="font-size: 0.72rem; color: rgba(255,255,255,0.6); line-height: 1.8; background: rgba(0,0,0,0.18); padding: 10px; border-radius: 8px;">
+            <strong style="color: rgba(255,255,255,0.85);">پیامک‌ها:</strong> ارسال‌شده ${fmt(t.smsSent)} | در صف ${fmt(t.smsQueued)} |
+            <strong style="color: rgba(255,255,255,0.85);">وظایف باز:</strong> ${fmt(t.openTasks)}
+          </div>
+        `}
+
+        <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.08); margin: 4px 0;" />
+
+        <div style="font-size: 0.75rem; font-weight: bold; color: rgba(255,255,255,0.85);">🤝 تعهدات پرداخت مشترکین</div>
+        ${this.commitmentsList.length === 0 ? html`<div style="font-size: 0.7rem; color: rgba(255,255,255,0.4);">هنوز تعهدی ثبت نشده است.</div>` :
+          this.commitmentsList.slice(-6).reverse().map((c: any) => html`
+            <div style="display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 8px 10px; font-size: 0.7rem;">
+              <div style="display: flex; flex-direction: column; gap: 2px;">
+                <span style="color: rgba(255,255,255,0.9);">${c.subscriberName} — ${(Number(c.amount) || 0).toLocaleString('fa-IR')} ریال ${c.installments ? `(${c.installments} قسط)` : ''}</span>
+                <span style="color: rgba(255,255,255,0.45);">سررسید: ${c.dueDate} | منبع: ${c.source === 'ivr-dtmf' ? 'IVR/DTMF' : c.source}</span>
+              </div>
+              ${c.fulfilled ? html`<span style="color: #4ade80;">✅ وصول شد</span>` : html`
+                <button class="sub-action-btn" style="padding: 4px 8px; font-size: 0.65rem;" @click=${() => this.fulfillCommitment(c.id)}>ثبت وصول</button>
+              `}
+            </div>
+          `)
+        }
+
+        <div style="font-size: 0.75rem; font-weight: bold; color: rgba(255,255,255,0.85);">📋 وظایف پیگیری</div>
+        ${this.followUpTasks.length === 0 ? html`<div style="font-size: 0.7rem; color: rgba(255,255,255,0.4);">وظیفه‌ای وجود ندارد.</div>` :
+          this.followUpTasks.slice(-6).reverse().map((task: any) => html`
+            <label style="display: flex; align-items: center; gap: 8px; font-size: 0.7rem; color: ${task.done ? 'rgba(255,255,255,0.35)' : 'rgba(255,255,255,0.8)'}; cursor: pointer;">
+              <input type="checkbox" .checked=${!!task.done} @change=${() => this.toggleTask(task.id)} />
+              <span style="${task.done ? 'text-decoration: line-through;' : ''}">${task.note} (${task.subscriberName} — سررسید ${task.dueDate})</span>
+            </label>
+          `)
+        }
+
+        <hr style="border: 0; border-top: 1px solid rgba(255,255,255,0.08); margin: 4px 0;" />
+
+        <div style="font-size: 0.75rem; font-weight: bold; color: rgba(255,255,255,0.85);">✉️ دفترچه پیامک‌ها (Outbox)</div>
+        ${this.smsLogList.length === 0 ? html`<div style="font-size: 0.7rem; color: rgba(255,255,255,0.4);">پیامکی ثبت نشده است.</div>` :
+          this.smsLogList.slice(-5).reverse().map((m: any) => html`
+            <div style="background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.05); border-radius: 8px; padding: 7px 10px; font-size: 0.68rem;">
+              <div style="display: flex; justify-content: space-between;">
+                <span style="color: #00e5ff;">${m.to}</span>
+                <span style="color: ${m.status === 'sent' ? '#4ade80' : m.status === 'queued' ? '#fbbf24' : '#fb7185'};">${m.status === 'sent' ? '✓ ارسال شد' : m.status === 'queued' ? '⏱ در صف' : '✖ خطا'}</span>
+              </div>
+              <div style="color: rgba(255,255,255,0.6); margin-top: 3px; line-height: 1.5;">${m.body}</div>
+            </div>
+          `)
+        }
+
+        <div style="display: flex; gap: 6px;">
+          <input class="search-input" placeholder="شماره مقصد 0918..." style="flex: 0 0 34%;" .value=${this.manualSmsTo} @input=${(e: any) => { this.manualSmsTo = e.target.value; }} />
+          <input class="search-input" placeholder="متن پیامک یادآوری..." style="flex: 1;" .value=${this.manualSmsBody} @input=${(e: any) => { this.manualSmsBody = e.target.value; }} />
+          <button class="sub-action-btn" style="padding: 6px 10px; font-size: 0.7rem;" @click=${() => { this.sendManualSms(this.manualSmsTo, this.manualSmsBody); this.manualSmsTo = ''; this.manualSmsBody = ''; }}>ارسال</button>
+        </div>
+      </div>
+    `;
+  }
   private renderWebAgentTab() {
     return html`
       <div style="display: flex; flex-direction: column; gap: 14px;">
@@ -2755,6 +3079,7 @@ export class GdmLiveAudio extends LitElement {
             <button class="console-tab ${this.activeTab === 'monitor' ? 'active' : ''}" @click=${() => this.activeTab = 'monitor'}>مانیتورینگ تماس</button>
             <button class="console-tab ${this.activeTab === 'subscribers' ? 'active' : ''}" @click=${() => this.activeTab = 'subscribers'}>پایگاه مشترکین</button>
             <button class="console-tab ${this.activeTab === 'strategy' ? 'active' : ''}" @click=${() => this.activeTab = 'strategy'}>استراتژی هوش‌مصنوعی</button>
+            <button class="console-tab ${this.activeTab === 'reports' ? 'active' : ''}" @click=${() => { this.activeTab = 'reports'; this.fetchKpiReports(); this.fetchCommitments(); this.fetchSmsLog(); }}>گزارشات و KPI</button>
             <button class="console-tab ${this.activeTab === 'webagent' ? 'active' : ''}" @click=${() => this.activeTab = 'webagent'}>عامل وبگرد (CIS)</button>
             <button class="console-tab ${this.activeTab === 'logs' ? 'active' : ''}" @click=${() => this.activeTab = 'logs'}>لاگ‌های سیستم</button>
           </div>
@@ -2764,6 +3089,7 @@ export class GdmLiveAudio extends LitElement {
             ${this.activeTab === 'monitor' ? this.renderMonitorTab() : ''}
             ${this.activeTab === 'subscribers' ? this.renderSubscribersTab() : ''}
             ${this.activeTab === 'strategy' ? this.renderStrategyTab() : ''}
+            ${this.activeTab === 'reports' ? this.renderReportsTab() : ''}
             ${this.activeTab === 'webagent' ? this.renderWebAgentTab() : ''}
             ${this.activeTab === 'logs' ? this.renderLogsTab() : ''}
           </div>

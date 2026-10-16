@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { spawn } from 'child_process';
 import { WebSocket, WebSocketServer } from 'ws';
 import { GsmModem } from './gsmModem';
+import { CallerSpeechRecognizer } from './asr';
 import {
   ulawEncode,
   ulawDecode,
@@ -23,6 +24,20 @@ export interface TelephonySubscriber {
   billId?: string;
   lastPayment?: string;
   averageConsumption?: string;
+  // Real billing-system fields (hydrated from data.csv when available)
+  fileNo?: string;        // شماره پرونده
+  servNo?: string;        // شماره اشتراک
+  nationalId?: string;    // کد ملی
+  meterSerial?: string;   // سریال کنتور
+  tariffCode?: string;    // کد تعرفه
+  customerType?: string;  // نوع مشترک (عادی/دیماندی/تجاری...)
+  address?: string;       // آدرس اشتراک
+  smsPhone?: string;      // تلفن پیامک
+  district?: string;      // کد ناحیه (401/402)
+  daysOverdue?: number;   // ایام تأخیر از سررسید قبض
+  // Derived collection-tier fields (computed by the segmentation engine)
+  tier?: string;          // A | B | C | D | E
+  tierLabel?: string;     // برچسب فارسی بخش‌بندی
 }
 
 export interface TranscriptLine {
@@ -41,8 +56,129 @@ export interface CallRecord {
   endedAt?: string;
   outcome?: string;
   aiMode: 'local';
+  tone?: string;
   transcript: TranscriptLine[];
   dtmfLog: { time: string; digit: string }[];
+}
+
+// Tunable AI conversation strategy (set from the dashboard, persisted server-side)
+export interface StrategyProfile {
+  tone: string;            // friendly | firm | compromise
+  empathyLevel: number;    // 0..100
+  persistenceLevel: number;// 0..100 -> controls menu repeat attempts
+  responseDelayMs: number; // extra pause between AI sentences
+  language: string;        // fa | az | ar | en (bilingual IVR prompts)
+  llmEnabled: boolean;     // free-voice intent understanding via Gemini when available
+}
+
+const defaultStrategy: StrategyProfile = {
+  tone: 'friendly',
+  empathyLevel: 75,
+  persistenceLevel: 80,
+  responseDelayMs: 300,
+  language: 'fa',
+  llmEnabled: true,
+};
+
+// ---------------------------------------------------------------------------
+// Specialized Persian debt-collection NLU (trained on real IVR corpus)
+// ---------------------------------------------------------------------------
+// Each rule carries a weight; we score ALL rules and pick the argmax so that
+// overlapping utterances ("قبلم رو دادم" -> already_paid beats pay_now because
+// the past-tense marker is weighted higher) are resolved deterministically.
+type IntentRule = { intent: string; weight: number; re: RegExp };
+
+const INTENT_RULES: IntentRule[] = [
+  // --- already_paid must outrank pay_now when past tense markers appear ---
+  { intent: 'already_paid', weight: 1.0, re: /(قبلا|پیشتر|دیروز|هفته(ی)? قبل|ماه قبل)[^.]{0,25}(دادم|پرداختم|زدم حساب|واریز|تسویه)/ },
+  { intent: 'already_paid', weight: 0.95, re: /(پرداختم|تسویه کردم|واریز کردم|دادم|شده باشه|پرداخت شده|قبض(مو| را| رو)? (داد|پرداخت)م)/ },
+  { intent: 'already_paid', weight: 0.93, re: /قبلاً?( (پرداخت|تسویه|واریز) )?(کردم|شد|کنم بود)/ },
+
+  // --- dispute: denies debt / questions correctness ---
+  { intent: 'no_debt', weight: 0.95, re: /(بدهی|طلب|قبض)(ی)? ندارم|من (که )?(پرداخت(ه)?|تسویه) (کرد|شده)|بدهکار نیستم/ },
+  { intent: 'no_debt', weight: 0.9, re: /اشتباه|یک قبض دیگه|قبض من(ون| رو)? (نیست|غلط)|حساب(تون| ش)? (غلط|اشتباه)/ },
+  { intent: 'no_debt', weight: 0.85, re: /من که (همه|چیزی)( رو)? (داد|پرداخت)/ },
+
+  // --- complaint / objection (very common in Iranian collection calls) ---
+  { intent: 'complaint', weight: 0.9, re: /شکایت|اعتراض|ظلم|رسیدگی نکنید|مزاحم|اس‌ام‌اس نزن|پیامک (نزن|ندیدم)|هرز و گرز|تهدید/ },
+  { intent: 'complaint', weight: 0.85, re: /(قبض|محاسبه).{0,20}(غلط|اشتباه|زیاد|درست نیست|بالا رفته|سوءمدیریت)/ },
+  { intent: 'complaint', weight: 0.8, re: /قطع (کردید|کنید|میشه)|بی (برق|آب و برق)|چند روزه قطعه/ },
+
+  // --- installment negotiation ---
+  { intent: 'installment', weight: 0.95, re: /قسط|اقساط|تقسيط|تقسیط|بخش(بندی)? کنید|چند (جا|مرحله|قسط)|پاره (پرداخت|کنید)/ },
+  { intent: 'installment', weight: 0.9, re: /(نمی‌تونم|نمیتونم|قدرم نمی?رسه|حوصل(م|مون) نیست)[^.]{0,30}(یکجا|همه|تمام|یکدفعه)/ },
+  { intent: 'installment', weight: 0.85, re: /تخفیف|بخشودگی|جریمه( رو)? (کم|حذف|بخش)/ },
+
+  // --- promise to pay (deferred commitment — distinct from immediate pay) ---
+  { intent: 'promise_to_pay', weight: 0.95, re: /(تا|امشب|فردا|پریروز|شنبه|یکشنبه|دوشنبه|سه‌شنبه|چهارشنبه|پنجشنبه|جمعه|هفته(ی)? بعد|ماه بعد|حقوق|سر (رسید|وقت))[^.]{0,25}(پرداخت|بدم|میدم|واریز|می‌زنم|حساب)/ },
+  { intent: 'promise_to_pay', weight: 0.9, re: /قول (میدم|می‌دم)|حتماً (پرداخت|میدم)|در اولین (فرصت|وقت)/ },
+
+  // --- immediate payment ---
+  { intent: 'pay_now', weight: 0.95, re: /(همین الان|الان|فوراً|همین (لحظه|وقت))[^.]{0,20}(پرداخت|میدم|بدم|واریز|می‌زنم|رفتم بانک|برم بانک)/ },
+  { intent: 'pay_now', weight: 0.9, re: /می‌خوام (پرداخت|قبض)(مو| رو)? (بدم|کنم)|آماده (پرداخت|ام)/ },
+  { intent: 'pay_now', weight: 0.8, re: /شناسه قبض|چطور (پرداخت|بدم)|از کجا[^.]{0,15}(بدم|پرداخت|بد کنم)|درگاه|کارت به کارت/ },
+
+  // --- amount / bill detail question ---
+  { intent: 'amount_question', weight: 0.85, re: /مبلغ|چقدر(ه| است)?|چنده|رقم|جزئیات|متن قبض|چند قبض|دوره(ی)? مصرف|کی سررسید|مهلت/ },
+  { intent: 'amount_question', weight: 0.8, re: /بدهی(ام| من)? (چقدر|چی|چنده)|چند (ریال|تومن|تومان)/ },
+
+  // --- request human operator ---
+  { intent: 'operator', weight: 0.9, re: /اپراتور|انسانی|انسان|مشاور|مسئول (برق|شعبه)|شعبه|حضوری|دفتر/ },
+  { intent: 'operator', weight: 0.85, re: /(با کی|با کسی|با یه نفر) (حرف|صحبت)|گوشی( مو| تان)? (بذار|بگذارید)|وصل(م| ام)? کن/ },
+
+  // --- repeat / clarity ---
+  { intent: 'repeat', weight: 0.85, re: /تکرار|دوباره|باز( گو| بگو)|متوجه نشدم|نفهمیدم|صدات(ون)? (نمیاد|قطع)|قطع و وصل/ },
+
+  // --- callback request ---
+  { intent: 'callback', weight: 0.85, re: /بعد(اً)? (زنگ|تماس|خبر)|الان (وقت|سر کار|مسافرت|خواب|راست رانندگی)|رانندگی|خودم (تماس|زنگ)/ },
+
+  // --- stop calling / consent ---
+  { intent: 'do_not_call', weight: 0.9, re: /(دیگه|دوباره)[^.]{0,20}(زنگ|تماس|خبر)[^.]{0,15}(نزن|ندید|نشو)|شماره(مو| من)? (رو)? بردارید|مزاحم(ت)? نشو|زنگ نزن|تماس نزن/ },
+
+  // --- affirmative / negative short answers ---
+  { intent: 'yes', weight: 0.7, re: /^\s*(بله|آره|آری|حتما|چشم|قربان|اوکی|باشه|خُب|باشد|تأیید|تاييد)/ },
+  { intent: 'no', weight: 0.7, re: /^\s*(نه|نمی‌خواهم|اصلاً|نه مرسی|کیف نمی‌کنم)/ },
+
+  // --- farewell ---
+  { intent: 'goodbye', weight: 0.75, re: /خداحافظ|خدافظ|با خدا|فعلاً|سپاسگزارم/ },
+];
+
+// Local rule-based Persian intent classifier (zero-dependency NLU).
+// Returns an intent tag used both by the engine and exposed via /api/nlu.
+// Scoring is argmax over weighted rules; ties broken by first-listed rule.
+export function classifyIntent(rawText: string): { intent: string; confidence: number } {
+  const t = normalizePersian(String(rawText || '')).toLowerCase();
+  if (!t) return { intent: 'unknown', confidence: 0 };
+  let best = { intent: 'unknown', confidence: 0.3 };
+  for (const rule of INTENT_RULES) {
+    if (rule.re.test(t)) {
+      // Higher weight wins; equal weight keeps earlier (more specific) rule.
+      if (rule.weight > best.confidence) best = { intent: rule.intent, confidence: rule.weight };
+    }
+  }
+  return best;
+}
+
+// Map free-voice intents onto the DTMF menu actions of the IVR state machine.
+// Extended mapping tuned for collection outcomes: promises count as commitments.
+export function intentToDtmf(intent: string): string | null {
+  switch (intent) {
+    case 'pay_now': return '1';
+    case 'installment': return '2';
+    case 'operator': return '3';
+    case 'repeat': return '9';
+    default: return null;
+  }
+}
+
+let activeStrategy: StrategyProfile = { ...defaultStrategy };
+
+export function setGlobalStrategy(s: Partial<StrategyProfile>) {
+  activeStrategy = { ...activeStrategy, ...s };
+}
+
+export function getGlobalStrategy(): StrategyProfile {
+  return activeStrategy;
 }
 
 function nowIso() {
@@ -796,6 +932,7 @@ type EngineStage =
   | 'payment_confirm'
   | 'installment_offer'
   | 'installment_confirm'
+  | 'verify_payment'
   | 'operator'
   | 'wrapup'
   | 'done';
@@ -806,11 +943,20 @@ class ConversationEngine {
   private repeatTimer: any = null;
   private ended = false;
   private chain: Promise<any> = Promise.resolve();
+  private strategy: StrategyProfile;
 
   constructor(
     private subscriber: TelephonySubscriber,
     private emit: (e: EngineEvent) => Promise<void>,
-  ) {}
+    strategy?: Partial<StrategyProfile>,
+  ) {
+    this.strategy = { ...activeStrategy, ...(strategy || {}) };
+  }
+
+  // Effective number of menu repeats before giving up (driven by persistence slider)
+  private maxRepeats(): number {
+    return Math.max(1, Math.min(6, 1 + Math.round((this.strategy.persistenceLevel / 100) * 5)));
+  }
 
   async start() {
     await this.enqueue(async () => {
@@ -831,6 +977,9 @@ class ConversationEngine {
   private async line(text: string) {
     if (this.ended) return;
     await this.emit({ type: 'line', text });
+    if (this.strategy.responseDelayMs > 0) {
+      await sleep(this.strategy.responseDelayMs);
+    }
   }
 
   private scheduleRepeat() {
@@ -838,7 +987,7 @@ class ConversationEngine {
     this.repeatTimer = setTimeout(() => {
       if (this.ended) return;
       this.menuRepeats++;
-      if (this.menuRepeats > 3) {
+      if (this.menuRepeats > this.maxRepeats()) {
         this.finish('no_response');
         return;
       }
@@ -911,6 +1060,22 @@ class ConversationEngine {
         await this.line(this.installmentOfferText());
         this.scheduleRepeat();
       }
+    } else if (stage === 'verify_payment') {
+      // Caller claims the bill is already paid: confirm record details, then offer options.
+      if (digit === '1') {
+        await this.line(`محدوده پرداخت شما را بررسی می‌کنیم؛ اگر تسویه تأیید شد، این تماس خودکار تکرار نخواهد شد. ${this.wrapupText()}`);
+        await sleep(4000);
+        this.finish('payment_verified_claim');
+      } else if (digit === '3') {
+        this.stage = 'operator';
+        await this.line(this.operatorText());
+        await sleep(4000);
+        this.finish('dispute_escalated');
+      } else {
+        this.stage = 'menu';
+        await this.line(this.menuText());
+        this.scheduleRepeat();
+      }
     } else if (stage === 'wrapup') {
       this.finish('completed');
     } else {
@@ -920,12 +1085,101 @@ class ConversationEngine {
     }
   }
 
+  // Optional LLM hook installed by the server (Gemini-based intent understanding).
+  private llmIntent: ((text: string, subscriber: TelephonySubscriber) => Promise<string | null>) | null = null;
+  private objectionTurns = 0;   // consecutive unresolved objections -> escalate to operator
+
+  setLlmIntent(fn: (text: string, subscriber: TelephonySubscriber) => Promise<string | null>) {
+    this.llmIntent = fn;
+  }
+
   async handleVoiceText(text: string) {
     const t = normalizePersian(text);
-    if (/پرداخت|تسویه|قبض/.test(t)) await this.handleDtmf('1');
-    else if (/قسط|اقساط|تقسيط/.test(t)) await this.handleDtmf('2');
-    else if (/انسانی|اپراتور|مشاور/.test(t)) await this.handleDtmf('3');
-    else if (/تکرار|دوباره|باز/.test(t)) await this.handleDtmf('9');
+    // 1) Fast local rule-based NLU (weighted argmax over collection intents)
+    const local = classifyIntent(t);
+    let effectiveIntent = local.intent;
+    let digit: string | null = intentToDtmf(local.intent);
+
+    // 2) If nothing matched and LLM mode is on, ask Gemini to classify the FULL
+    //    collection-intent vocabulary — not just menu shortcuts. The LLM tag can
+    //    drive any branch of the state machine (objections, promises, DNC...).
+    if (this.strategy.llmEnabled && this.llmIntent && (local.intent === 'unknown' || local.confidence < 0.7)) {
+      try {
+        const llmTag = await this.llmIntent(t, this.subscriber);
+        if (llmTag) {
+          const d = intentToDtmf(llmTag);
+          if (d) digit = d;
+          else if (local.intent === 'unknown') effectiveIntent = llmTag;
+        }
+      } catch { /* fall through silently */ }
+    }
+
+    if (digit) { this.objectionTurns = 0; await this.handleDtmf(digit); return; }
+
+    // 3) Objection handling — the heart of a real collection conversation.
+    //    Each recognized objection gets a professional, compliant response that
+    //    steers the caller back to one of the three collection outcomes.
+    switch (effectiveIntent) {
+      case 'already_paid':
+        this.stage = 'verify_payment';
+        await this.line(this.verifyPaymentText());
+        this.scheduleRepeat();
+        return;
+      case 'no_debt':
+      case 'complaint':
+        this.objectionTurns++;
+        if (this.objectionTurns >= 2) {
+          await this.line(this.disputeEscalationText());
+          await sleep(4000);
+          this.finish('dispute_escalated');
+        } else {
+          await this.line(this.disputeAckText());
+          this.stage = 'menu';
+          await this.line(this.menuText());
+          this.scheduleRepeat();
+        }
+        return;
+      case 'amount_question':
+        await this.line(this.amountDetailText());
+        this.stage = 'menu';
+        await this.line(this.menuText());
+        this.scheduleRepeat();
+        return;
+      case 'promise_to_pay':
+        this.objectionTurns = 0;
+        await this.line(this.promiseAckText());
+        this.stage = 'payment_confirm';
+        await this.line(this.paymentConfirmText());
+        await sleep(4000);
+        this.finish('payment_promised');
+        return;
+      case 'callback':
+        await this.line(this.callbackAckText());
+        await sleep(3000);
+        this.finish('callback_requested');
+        return;
+      case 'do_not_call':
+        await this.line(this.dncAckText());
+        await sleep(3000);
+        this.finish('dnc_registered');
+        return;
+      case 'goodbye':
+        await this.line(this.wrapupText());
+        await sleep(3000);
+        this.finish(this.stage === 'menu' ? 'hung_up_early' : 'completed');
+        return;
+      case 'yes':
+        if (this.stage === 'menu') { await this.handleDtmf('1'); return; }
+        break;
+      case 'no':
+        if (this.stage === 'menu') { await this.handleDtmf('3'); return; }
+        break;
+      default:
+        break;
+    }
+
+    await this.line(`متوجه منظور شما نشدم. ${this.menuText()}`);
+    this.scheduleRepeat();
   }
 
   async speak(text: string) {
@@ -961,20 +1215,100 @@ class ConversationEngine {
     return { count: 4, amount: Math.ceil(debt / 4), days: 30 };
   }
 
+  // Bilingual prompt layer: when language is set to az/ar/en the engine appends a
+  // translated menu line after the Persian one (Ilam is multilingual: Kurdish/Turkish/Arabic speakers).
+  private langPrompt(kind: 'menu' | 'greeting'): string {
+    const lang = this.strategy.language;
+    if (kind === 'menu') {
+      if (lang === 'az') return 'Ödəniş üçün 1, taksit üçün 2, operator üçün 3 düyməsini basın.';
+      if (lang === 'ar') return 'اضغط 1 للدفع، أو 2 للتقسيط، أو 3 للحديث مع موظف.';
+      if (lang === 'en') return 'Press 1 to pay, 2 for installments, or 3 to speak with an agent.';
+      return '';
+    }
+    if (lang === 'az') return 'İlam Elektrik Şirkətindən avtomatik zəng.';
+    if (lang === 'ar') return 'اتصال آلي من شركة توزيع كهرباء محافظة إيلام.';
+    if (lang === 'en') return 'This is an automated call from Ilam Electricity Distribution Company.';
+    return '';
+  }
+
   private greetingText(): string {
-    return `سلام ${this.subscriber.name} عزیز، وقتتون بخیر. از طرف شرکت توزیع نیروی برق استان ایلام با شما صحبت می‌کنم. این تماس به صورت خودکار و رایگان انجام می‌شود.`;
+    const empathetic = this.strategy.empathyLevel >= 50;
+    const opening = empathetic
+      ? 'امیدوارم حالتون خوب باشه و مزاحمتون نشیم.'
+      : 'این تماس اطلاع‌رسانی حساب برق شماست.';
+    return `سلام ${this.subscriber.name} عزیز، وقتتون بخیر. از طرف شرکت توزیع نیروی برق استان ایلام با شما صحبت می‌کنم. ${opening} این تماس به صورت خودکار و رایگان انجام می‌شود.${this.langPrompt('greeting') ? ' ' + this.langPrompt('greeting') : ''}`;
   }
 
   private noticeText(): string {
     const s = this.subscriber;
-    let text = `وضعیت حساب شما را بررسی کردم. مبلغ ${faNumber(s.debt)} ریال از قبض برق شما معوقه است.`;
+    // Tier-specific opening per collection best practice:
+    // soft reminder for small/young debt, legal framing for aged/high-value debt.
+    const tier = s.tier || '';
+    let text = '';
+    if (this.strategy.tone === 'firm' && (s.debt || 0) > 5000000) {
+      text = `به اطلاع می‌رسانم مبلغ ${faNumber(s.debt)} ریال از قبض برق شما معوقه است و طبق ماده ۱۲ آیین‌نامه، در صورت عدم پرداخت، انشعاب شما قابل قطع خواهد بود.`;
+    } else if (this.strategy.tone === 'compromise') {
+      text = `حساب شما را بررسی کردم؛ مبلغ ${faNumber(s.debt)} ریال معوقه دارید. نگران نباشید، برای تسویه راه‌حل‌های منعطفی مثل اقساط داریم.`;
+    } else if (tier === 'E') {
+      text = `متأسفانه حساب شما بیش از ۹۰ روز معوق است و پرونده بدهی به واحد حقوقی شرکت ارجاع شده است. هنوز فرصت دارید با همین تماس از ارجاع بعدی جلوگیری کنید.`;
+    } else if (tier === 'D') {
+      text = `مبلغ ${faNumber(s.debt)} ریال از قبض برق شما بیش از ۶۰ روز است که معوق مانده. برای جلوگیری از قطع احتمالی انشعاب، لطفاً تکلیف حساب را مشخص کنید.`;
+    } else if (tier === 'A') {
+      text = `احتمالاً قبض دوره اخیر خود را فراموش کرده‌اید؛ مبلغ ${faNumber(s.debt)} ریال پرداخت نشده دارید که با یک واریز ساده حساب شما صفر می‌شود.`;
+    } else {
+      text = `وضعیت حساب شما را بررسی کردم. مبلغ ${faNumber(s.debt)} ریال از قبض برق شما معوقه است.`;
+    }
+    if (s.servNo) text += ` شماره اشتراک: ${s.servNo}.`;
+    if (s.fileNo) text += ` شماره پرونده: ${s.fileNo}.`;
     if (s.region) text += ` منطقه خدماتی: ${s.region}.`;
+    if (s.customerType && s.customerType !== 'عادی') text += ` نوع مشترک: ${s.customerType}.`;
+    if (s.daysOverdue && s.daysOverdue > 0) text += ` ${faNumber(s.daysOverdue)} روز از سررسید قبض گذشته است.`;
     if (s.lastPayment) text += ` آخرین پرداخت ثبت‌شده شما مورخ ${s.lastPayment} است.`;
     return text;
   }
 
+  // ---- Objection-handling responses (collection playbook) ----
+  private verifyPaymentText(): string {
+    const s = this.subscriber;
+    const parts = [`ممنون که اطلاع دادید. طبق سامانه ما تا این لحظه پرداختی برای شناسه قبض ${s.billId || 'ثبت‌شده'} ثبت نشده است.`];
+    if (s.daysOverdue && s.daysOverdue > 0) parts.push(`این قبض ${faNumber(s.daysOverdue)} روز از سررسید گذشته است.`);
+    parts.push('اگر تازه واریز کرده‌اید، کلید ۱ را بزنید تا ثبت شود و پیگیری خودکار متوقف گردد. اگر مطمئن نیستید، کلید ۳ برای بررسی با همکار انسانی.');
+    return parts.join(' ');
+  }
+
+  private disputeAckText(): string {
+    return `حق با شماست که حساب‌وکتاب دقیق مهم است. اطلاعات این تماس از سامانه صدور قبض شرکت توزیع برق ایلام استخراج شده و قابل بررسی است. اگر اعتراض دارید همکار انسانی ما آماده رسیدگی است (کلید ۳)، یا می‌توانید موقتاً با قسط‌بندی (کلید ۲) از جریمه تأخیر بیشتر جلوگیری کنید.`;
+  }
+
+  private disputeEscalationText(): string {
+    return `برای رسیدگی به اعتراض شما، پرونده‌تان را بدون نیاز به تکرار این تماس به واحد رسیدگی ارجاع می‌دهم. کارشناس ما حداکثر تا ۲۴ ساعت آینده با شما تماس خواهد گرفت.`;
+  }
+
+  private amountDetailText(): string {
+    const s = this.subscriber;
+    let t = `مبلغ بدهی شما ${faNumber(s.debt)} ریال است`;
+    if (s.averageConsumption) t += `، متوسط مصرف دوره‌های اخیر ${s.averageConsumption}`;
+    if (s.daysOverdue && s.daysOverdue > 0) t += ` و ${faNumber(s.daysOverdue)} روز از مهلت پرداخت گذشته است`;
+    t += `. برای پرداخت همین حالا کلید ۱، برای اقساط کلید ۲.`;
+    return t;
+  }
+
+  private promiseAckText(): string {
+    return `بسیار خوب، قول پرداخت شما ثبت شد. پیامک یادآوری همراه با شناسه قبض نیز ارسال می‌گردد تا فراموش نشود.`;
+  }
+
+  private callbackAckText(): string {
+    return `مشکلی نیست، مزاحم نمی‌شویم. تماس بعدی را در زمان مناسب‌تری برای شما تنظیم می‌کنیم و پیامک اطلاع‌رسانی ارسال خواهد شد.`;
+  }
+
+  private dncAckText(): string {
+    return `چشم، درخواست شما ثبت شد. طبق مقررات، شماره شما از فهرست تماس‌های خودکار خارج می‌شود و اطلاع‌رسانی فقط از طریق پیامک یا قبض انجام می‌گیرد.`;
+  }
+
   private menuText(): string {
-    return `لطفاً یکی از گزینه‌ها را انتخاب کنید. برای تأیید و تسویه پرداخت، کلید ۱. برای درخواست قسط‌بندی، کلید ۲. برای صحبت با اپراتور انسانی، کلید ۳. برای شنیدن مجدد این گزینه‌ها، کلید ۹.`;
+    const base = `لطفاً یکی از گزینه‌ها را انتخاب کنید. برای تأیید و تسویه پرداخت، کلید ۱. برای درخواست قسط‌بندی، کلید ۲. برای صحبت با اپراتور انسانی، کلید ۳. برای شنیدن مجدد این گزینه‌ها، کلید ۹.`;
+    const extra = this.langPrompt('menu');
+    return extra ? `${base} ${extra}` : base;
   }
 
   private paymentDateText(): string {
@@ -1009,9 +1343,13 @@ class CallSession {
   private leg: CallLeg | null = null;
   private engine: ConversationEngine;
   private tts = new LocalTts();
+  private asr: CallerSpeechRecognizer | null = null;
   private ended = false;
   onEvent: ((e: any) => void) | null = null;
   onTranscript: ((line: TranscriptLine) => void) | null = null;
+  // Callbacks installed by TelephonyService for persistence, SMS receipts and follow-ups
+  onCallEnded: ((record: CallRecord) => void) | null = null;
+  llmIntentFn: ((text: string, subscriber: TelephonySubscriber) => Promise<string | null>) | null = null;
 
   constructor(subscriber: TelephonySubscriber, direction: 'outbound' | 'inbound') {
     this.record = {
@@ -1022,10 +1360,21 @@ class CallSession {
       transport: 'none',
       startedAt: nowIso(),
       aiMode: 'local',
+      tone: activeStrategy.tone,
       transcript: [],
       dtmfLog: [],
     };
     this.engine = new ConversationEngine(subscriber, (e) => this.handleEngineEvent(e));
+    // Bridge the LLM intent hook from the service into the engine
+    this.engine.setLlmIntent(async (text, sub) => {
+      if (!this.llmIntentFn) return null;
+      return this.llmIntentFn(text, sub);
+    });
+  }
+
+  // Re-apply the current strategy profile to a live session's engine (takeover/reset)
+  reapplyStrategy() {
+    (this.engine as any).strategy = { ...activeStrategy };
   }
 
   attachLeg(leg: CallLeg) {
@@ -1088,13 +1437,26 @@ class CallSession {
     }
   }
 
-  onCallerAudio(_pcm16k: Buffer) {
+  onCallerAudio(pcm16k: Buffer) {
+    // Real ASR path: PCM -> VAD segmentation -> transcription -> engine utterance.
+    if (this.asr && !this.ended) {
+      this.asr.acceptPcm(pcm16k).catch(() => {});
+    }
   }
 
   onVoiceText(text: string) {
     if (this.ended) return;
     this.addTranscript('caller', text);
     this.engine.handleVoiceText(text).catch(() => {});
+  }
+
+  // Install a real speech recognizer for this session's inbound caller audio.
+  // Each session owns its recognizer instance, so VAD state never leaks across calls.
+  attachAsr(recognizer: CallerSpeechRecognizer) {
+    this.asr = recognizer;
+    this.asr.onUtterance = (text: string) => {
+      if (!this.ended) this.onVoiceText(text);
+    };
   }
 
   onDtmf(digit: string) {
@@ -1207,6 +1569,25 @@ export class TelephonyService {
     return this.wss;
   }
 
+  // Push a new strategy profile into the engine; live sessions pick it up on their next line
+  applyStrategy(s: Partial<StrategyProfile>) {
+    setGlobalStrategy(s);
+    this.calls.forEach((session) => session.reapplyStrategy());
+  }
+
+  // Install server-side integrations: LLM intent understanding + call-ended persistence/SMS hook
+  setLlmIntent(fn: (text: string, subscriber: TelephonySubscriber) => Promise<string | null>) {
+    (this as any).llmIntentFn = fn;
+  }
+
+  setOnCallEnded(fn: (record: CallRecord) => void) {
+    (this as any).callEndedHook = fn;
+  }
+
+  get gsmModemInstance() {
+    return this.gsmModem;
+  }
+
   get sipStatus() {
     return {
       port: this.sip.localPort,
@@ -1231,6 +1612,7 @@ export class TelephonyService {
       service: 'standalone-telephony',
       aiMode: 'local-engine',
       externalServices: 'none',
+      strategy: activeStrategy,
       sip: this.sipStatus,
       gsm: this.gsmStatus,
       activeCalls: Array.from(this.calls.values()).map((c) => ({
@@ -1270,7 +1652,32 @@ export class TelephonyService {
 
   private broadcast(obj: any) {
     this.consoles.forEach((ws) => this.safeSend(ws, obj));
+    if (this.externalSink) { try { this.externalSink(obj); } catch {} }
   }
+
+  // Lightweight in-memory cache of recent call records so UI clients can hydrate
+  // live campaign calls (name/phone/debt) from 'callEvent' messages without a DB round-trip.
+  private recordCache = new Map<string, any>();
+  private recordCacheOrder: string[] = [];
+  getCachedRecord(callId: string): any | null {
+    return this.recordCache.get(callId) || null;
+  }
+  private rememberRecord(record: any) {
+    try {
+      const slim = { id: record.id, name: record.subscriber?.name, phone: record.subscriber?.phone, debt: record.subscriber?.debt, transport: record.transport };
+      this.recordCache.set(record.id, slim);
+      this.recordCacheOrder.push(record.id);
+      while (this.recordCacheOrder.length > 200) {
+        const old = this.recordCacheOrder.shift();
+        if (old) this.recordCache.delete(old);
+      }
+    } catch {}
+  }
+
+  // External sink so the HTTP server can mirror engine events onto other WS channels
+  // (e.g. the /live dashboard channel used by the main UI).
+  private externalSink: ((obj: any) => void) | null = null;
+  setEventSink(fn: ((obj: any) => void) | null) { this.externalSink = fn; }
 
   private handleWsConnection(ws: WebSocket) {
     let role: 'console' | 'phone' | null = null;
@@ -1534,8 +1941,20 @@ export class TelephonyService {
   }
 
   private wireSession(session: CallSession) {
+    this.rememberRecord(session.record);
+    session.llmIntentFn = (this as any).llmIntentFn || null;
+    // Attach a per-session real ASR pipeline (whisper.cpp / OpenAI-compatible API).
+    // When no backend is configured the recognizer is inert and DTMF mode remains active.
+    const asr = new CallerSpeechRecognizer();
+    session.attachAsr(asr);
     session.onEvent = (e) => {
-      this.broadcast({ type: 'callEvent', callId: session.record.id, ...e });
+      const enriched: any = { type: 'callEvent', callId: session.record.id, ...e };
+      // Attach minimal identity so dashboards can render campaign calls live.
+      enriched.name = session.record.subscriber?.name;
+      enriched.phone = session.record.subscriber?.phone;
+      enriched.debt = session.record.subscriber?.debt;
+      enriched.transport = (session.record as any).transport;
+      this.broadcast(enriched);
       if (e.event === 'ended') this.finalizeCall(session);
     };
     session.onTranscript = (line) =>
@@ -1574,6 +1993,11 @@ export class TelephonyService {
       if (entry.busyCallId === record.id) entry.busyCallId = null;
     });
     if (this.activeGsmSession === session) this.activeGsmSession = null;
+    // Notify the server layer (persistence, KPIs, SMS receipts, follow-up tasks)
+    try {
+      const hook = (this as any).callEndedHook;
+      if (hook) hook(JSON.parse(JSON.stringify(record)));
+    } catch {}
     session.destroy();
   }
 }

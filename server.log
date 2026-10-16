@@ -1,0 +1,8 @@
+
+> audio-orb@0.0.0 dev
+> tsx server.ts
+
+◇ injected env (0) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+API key should be set when using the Gemini API.
+API key should be set when using the Gemini API.
+Server running on http://localhost:3000
