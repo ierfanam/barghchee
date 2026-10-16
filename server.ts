@@ -10,6 +10,7 @@ import { GoogleGenAI } from "@google/genai";
 import { TelephonyService, TelephonySubscriber, classifyIntent } from "./server/telephony";
 import { JsonStore } from "./server/db";
 import { SubscriberDatabaseConnector } from "./server/subscriberDb";
+import { portalLoginWithBillId, probeEservReachable, ESERV_LOGIN_URL } from "./server/eservPortal";
 import { SmsGateway, receiptSms, installmentSms } from "./server/sms";
 import {
   MediaLibrary, PlaybackManager, MediaAsset, ChartSpec, PresentationDeck, Slide,
@@ -438,6 +439,25 @@ async function startServer() {
   }
 
   // ---- Subscriber API: enriched records + tier filter for campaign targeting ----
+  // ---- Real public subscriber-portal integration (eserv.bargh-ilam.ir) ----
+  app.get("/api/eserv/status", async (_req, res) => {
+    try {
+      const probe = await probeEservReachable();
+      res.json({ url: ESERV_LOGIN_URL, ...probe });
+    } catch (e: any) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.get("/api/eserv/login/:billId", async (req, res) => {
+    try {
+      const result = await portalLoginWithBillId(String(req.params.billId));
+      res.status(result.ok ? 200 : 502).json(result);
+    } catch (e: any) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
   app.get("/api/subscribers", (req, res) => {
     const q = (req.query.q as string || "").toLowerCase();
     const tier = (req.query.tier as string || "").toUpperCase();
@@ -1516,7 +1536,7 @@ async function startServer() {
       const personaInstruction = ' تو یک دستیار صوتی زن جوان، بانشاط، صمیمی و دوستانه-رسمی هستی. لحن پاسخگویی تو باید بسیار لطیف، شیوا، زنانه و کاملا انسان‌گونه باشد.';
       const generalAssistantInstruction = ' علاوه بر امور برق ایلام، تو یک دستیار فوق‌هوشمند همه‌کاره هستی. اگر کاربر موسیقی (پخش آهنگ)، تولید تصویر، تولید کد، نمایش نمودار، ویدئو یا هر چیز بصری/شنیداری درخواست کرد، باید از ابزار displayWidget استفاده کنی. برای آهنگ آدرس یک فایل صوتی در اینترنت را پیدا کن یا به عنوان نمونه از یک لینک معتبر استفاده کن و widgetType را "audio" قرار بده. برای کدنویسی widgetType را "code" بگذار.';
       const mediaPresentationInstruction = ' تو روی صحنه چندرسانه‌ای زنده (Stage) کنترل کامل داری و وضعیت آن را بلادرنگ می‌بینی. قوانین: ۱) برای پخش موسیقی/آهنگ از playMedia با kind="audio" و برای ویدئو با kind="video" استفاده کن؛ اگر آهنگ یا فیلم مشخص را نمی‌دانی اول searchMediaLibrary یا searchWeb کن و آدرس مستقیم فایل (mp3/mp4/webm...) را پیدا کن. ۲) برای «ارائه/پرزنتیشن/اسلاید» از createPresentation استفاده کن و یک deck واقعی با اسلایدهای محتوامند (عنوان+بولت‌ها+یادداشت گوینده) بساز؛ حق نداری بگویی نمی‌توانی ارائه بدهی. ۳) برای نمودار و گراف از showChart (bar/line/area/pie/scatter) استفاده کن؛ برای سند متنی/Markdown/JSON/CSV/XML/PDF از openDocument و برای فایل ساختاریافته آپلودشده یا لینک‌شده هم همان. ۴) فرمان‌های «توقف/ادامه/پخش مجدد/بعدی/قبلی/برو به دقیقه X/سرعت ۱.۵/بلندی ۶۰ درصد/تکرار/تمام صفحه/اسلاید بعد» فقط با controlPlayback انجام می‌شوند. ۵) قبل از پاسخ به سوال «الان چه چیزی در حال پخش است؟ چقدر مانده؟ کجای ارائه هستیم؟» حتما getPlaybackState را صدا بزن و دقیقاً از روی telemetry زنده (زمان فعلی، پیشرفت، اسلاید جاری) جواب بده؛ حدس نزن. ۶) اگر کاربر فایل یا پیوند رسانه‌ای داد و خواست درباره‌اش صحبت کنی، با analyzeMediaFile یا openDocument محتوا را واقعاً روی سرور پارس کن و از خلاصه ساختاریافته استفاده کن.';
-      const fetchInstruction = ' خیلی مهم و حیاتی: تو هرگز نباید از پر کردن فرم‌ها یا ورود به سایت‌ها سر باز بزنی! تو کاملا توانایی داری وارد سایت‌های bargheman.com یا eserv.bargh-ilam.ir بشی. برای این کار فقط کافیه ابزار `fillAndSubmitBillForm` یا `executeNodeCode` را فراخوانی کنی تا اطلاعات شناسه قبض را به سایت ارسال کرده و نتیجه را بگیری. هیچ وقت نگو "من نمیتوانم وارد سایت شوم" یا "دسترسی ندارم". مستقیما و بدون بهانه‌گیری ابزار مربوطه را برای پر کردن فرم و لاگین فراخوانی کن.';
+      const fetchInstruction = ' خیلی مهم و حیاتی: دسترسی به تمام داده‌های مشترکین برق کاملاً قانونی و عمومی است! کافی است شناسه ۱۳ رقمی قبض در فیلد «شناسه قبض» فرم صفحه https://eserv.bargh-ilam.ir/home/login جایگذاری شود و دکمه «ورود» فشرده گردد؛ سپس به صفحه اطلاعات اشتراک با تب‌ها و بخش‌های گوناگون هدایت می‌شویم. تو این کار را واقعاً انجام می‌دهی: ابزار `fillAndSubmitBillForm` یا `loginToCustomerPortal` یک مرورگر واقعی را باز می‌کند، شناسه قبض را در فرم زنده تایپ می‌کند، دکمه ورود را می‌فشارد، redirect را دنبال می‌کند و محتوای همه تب‌ها را استخراج می‌نماید. هرگز از ورود به سایت سر باز نزن و هرگز نگو «نمی‌توانم وارد سایت شوم». اگر ابزار خطای شبکه داد، همان خطای واقعی را صادقانه به کاربر بگو و در صورت وجود، داده آینه فقط-خواندنی داخلی را با ذکر منبع ارائه کن — اما هرگز محتوای پورتال را جعل نکن. برای اطمینان از دسترسی لحظه‌ای سایت، می‌توانی اول `getEservPortalStatus` را صدا بزنی.';
       const phoneCallInstruction = ' برای برقراری تماس تلفنی واقعی به شماره های موبایل مشترکین، از ابزار initiateLivePhoneCall استفاده کن. این ابزار از سرویس تلفن مستقل و رایگان سازمان (SIP/RTP) استفاده می‌کند و نیازی به هیچ سرویس پولی خارجی ندارد. اگر شماره در شبکه داخلی یا ترانک SIP تنظیم نشده بود، با لحن دوستانه به کاربر بگو که برای تماس با شماره‌های خارجی، می‌تواند یک ترانک SIP رایگان یا سازمانی در تنظیمات سرور (SIP_PROXY_HOST) وارد کند یا از تلفن مرورگری در آدرس /phone.html استفاده کند.';
       const subscriberDbInstruction = ' دسترسی فقط-خواندنی به پایگاه داده واقعی مشترکین برق استان ایلام داری: ۱) برای پیدا کردن شناسه قبض/مشخصات مشترک از نام، کد ملی، تلفن، شماره اشتراک یا شماره پرونده، ابزار querySubscriberDatabase را صدا بزن (منبع نتایج همیشه در پاسخ ذکر می‌شود: SQL زنده یا آینه رسمی CSV). ۲) اگر سؤال آماری/تحلیلی خاص پرسیدند (مثلاً تعداد مشترکین یک ناحیه یا تعرفه)، با querySqlDatabase یک دستور SELECT فقط-خواندنی بنویس؛ هرگونه نوشتن/حذف/ویرایش توسط محافظ سرور رد می‌شود و تو هم هرگز نباید چنین دستوری صادر کنی. ۳) برای «وضعیت اتصال سرور دیتابیس» از getSubscriberDbStatus استفاده کن و عدد و رقم را فقط از پاسخ همان ابزار بگو، نه از حدس. ۴) مطلقاً حق نداری داده ساختگی یا نمونه نمایشی به ارباب‌رجوع بدهی؛ اگر رکوردی پیدا نشد صادقانه بگو یافت نشد. خدمات جدیدی که با همین داده فقط-خواندنی ارائه می‌دهی: استعلام لحظه‌ای قبض و بدهی، تاریخچه و دوره صورتحساب، پروفایل کامل اشتراک (کنتور، تعرفه، آدرس، ناحیه)، تفکیک سطح وصول، آمار واقعی مشترکین و گزارش‌گیری تحلیلی.';
 
@@ -1535,7 +1555,7 @@ async function startServer() {
               functionDeclarations: [
                 {
                   name: 'fillAndSubmitBillForm',
-                  description: 'Logs into the source websites (bargheman.com / eserv.bargh-ilam.ir) by filling out the necessary login forms and bill ID fields. MUST use this when the user asks to enter the site or fill the bill form.',
+                  description: 'REAL browser automation of the PUBLIC subscriber portal https://eserv.bargh-ilam.ir/home/login : opens the live login form, types the 13-digit bill ID (شناسه قبض) into the bill-ID field, presses the real «ورود» button, follows the redirect to the subscriber info page and extracts ALL tabs/sections (مشخصات مشترک، سوابق، صورتحساب‌ها، مصرف). MUST use this whenever the user asks to enter the site, fill the bill form, or see what the portal shows for their bill ID. If the portal is unreachable it reports the real network error — never fake content.',
                   parameters: {
                     type: 'OBJECT',
                     properties: {
@@ -1602,7 +1622,7 @@ async function startServer() {
                 },
                 {
                   name: 'loginToCustomerPortal',
-                  description: 'Uses the 13-digit bill ID to log into the eserv.bargh-ilam.ir portal and accesses all tabs and subscriber details (personal info, billing history, consumption data).',
+                  description: 'Opens a REAL live session on the public portal eserv.bargh-ilam.ir with the 13-digit bill ID (form-fill + «ورود» click via headless Chromium), crawls every tab of the subscriber page and returns the actual rendered content, plus the read-only local DB profile as cross-reference. Portal failures are reported honestly with the real error.',
                   parameters: {
                     type: 'OBJECT',
                     properties: {
@@ -1610,6 +1630,11 @@ async function startServer() {
                     },
                     required: ['billId']
                   }
+                },
+                {
+                  name: 'getEservPortalStatus',
+                  description: 'Checks whether the public subscriber portal https://eserv.bargh-ilam.ir/home/login is reachable from this server right now (real HTTP/TLS probe with latency). Use before promising a portal visit, and report its honest result.',
+                  parameters: { type: 'OBJECT', properties: {}, required: [] }
                 },
                 {
                   name: 'checkElectricityBill',
@@ -1898,89 +1923,49 @@ async function startServer() {
                     break;
                   case 'fillAndSubmitBillForm':
                     try {
-                      safeSend(clientWs, { statusUpdate: 'در حال درج شناسه قبض در فرم ورود سامانه eserv.bargh-ilam.ir...' });
-                      
-                      let rawBillId = call.args?.billId || '';
-                      const billId = rawBillId
-                        .replace(/[۰٠]/g, '0').replace(/[۱١]/g, '1').replace(/[۲٢]/g, '2')
-                        .replace(/[۳٣]/g, '3').replace(/[۴٤]/g, '4').replace(/[۵٥]/g, '5')
-                        .replace(/[۶٦]/g, '6').replace(/[۷٧]/g, '7').replace(/[۸٨]/g, '8')
-                        .replace(/[۹٩]/g, '9').trim();
+                      safeSend(clientWs, { statusUpdate: 'در حال باز کردن فرم زنده سامانه مشترکین eserv.bargh-ilam.ir در مرورگر واقعی...' });
 
+                      const billId = faToEnDigits(String(call.args?.billId || '')).replace(/\D/g, '');
                       if (!billId) {
                          responseData = { error: 'شناسه قبض وارد نشده است.' };
                          break;
                       }
 
-                      // 1. Look up in subscriber DB
-                      const fs = nodeRequire('fs');
-                      const path = nodeRequire('path');
-                      let dbRecord: Record<string, string> | null = null;
-                      
-                      let csvFilePath = path.join(process.cwd(), 'data.csv');
-                      if (!fs.existsSync(csvFilePath)) {
-                        csvFilePath = path.join(process.cwd(), 'subscribers.csv');
-                      }
-                      if (fs.existsSync(csvFilePath)) {
-                        const fileContent = fs.readFileSync(csvFilePath, 'utf-8');
-                        const lines = fileContent.split('\n');
-                        const headers = lines[0].split(',').map((h: string) => h.trim());
-                        for (let i = 1; i < lines.length; i++) {
-                           if (!lines[i].trim()) continue;
-                           if (lines[i].includes(billId)) {
-                             const cols = lines[i].split(',');
-                             dbRecord = {};
-                             headers.forEach((h: string, idx: number) => {
-                               if (dbRecord) dbRecord[h] = (cols[idx] || '').trim();
-                             });
-                             break;
-                           }
-                        }
-                      }
+                      // REAL public-portal login flow against https://eserv.bargh-ilam.ir/home/login :
+                      // open the live page in headless Chromium, type the 13-digit bill ID into the
+                      // actual bill-ID field of the form, press the real «ورود» button, follow the
+                      // redirect to the subscriber info page and extract every tab/section content.
+                      safeSend(clientWs, { statusUpdate: 'در حال درج شناسه قبض در فیلد فرم و فشردن دکمه ورود...' });
+                      const portal = await portalLoginWithBillId(billId);
 
-                      // 2. Perform real POST request to login form
-                      safeSend(clientWs, { statusUpdate: 'در حال ارسال فرم لاگین با شناسه قبض به سایت اصلی...' });
-                      console.log('Posting billId to eserv.bargh-ilam.ir/Home/Login:', billId);
-                      
-                      let webResponseData = null;
-                      try {
-                        const params = new URLSearchParams();
-                        params.append('lgnBillIdnt', billId);
-                        params.append('formName', '');
-                        params.append('ctrlName', '');
-                        params.append('lgnFileNo', '');
-                        params.append('lgnServNo', '');
-                        params.append('lgnActvFabr', '');
-                        params.append('lgnCellPhon', '');
-                        params.append('lgnNatnCode', '');
-                        params.append('sbmt1', 'norm');
+                      // Cross-reference with the read-only subscriber DB (real rows only).
+                      const localRec = findBillingRecordByBillId(billId);
 
-                        const response = await axios.post('https://eserv.bargh-ilam.ir/Home/Login', params.toString(), {
-                          timeout: 3000,
-                          headers: {
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                            'Referer': 'https://eserv.bargh-ilam.ir/Home/Login'
-                          }
-                        });
-                        webResponseData = {
-                          status: response.status,
-                          headers: response.headers,
-                          htmlSnippet: typeof response.data === 'string' ? response.data.substring(0, 1500) : response.data
+                      if (portal.ok) {
+                        responseData = {
+                          status: 'success',
+                          source: portal.source,
+                          message: `ورود واقعی به پورتال با شناسه قبض ${billId} انجام شد؛ صفحه اطلاعات اشتراک باز شد و ${portal.tabs.length} تب/بخش استخراج گردید.`,
+                          finalUrl: portal.finalUrl,
+                          title: portal.title,
+                          tabs: portal.tabs,
+                          capturedAt: portal.capturedAt,
+                          localMirrorRecord: localRec || null,
                         };
-                      } catch (axiosError: any) {
-                        webResponseData = {
-                          note: 'ارتباط مستقیم با سرور انجام شد. اطلاعات از پایگاه داده محلی نیز استخراج گردید.',
-                          error: axiosError.message
+                        logSystem('INFO', `Real portal session for bill ${billId}: ${portal.tabs.length} tabs extracted from ${portal.finalUrl}`);
+                      } else {
+                        // Honest failure — never fabricate portal content.
+                        responseData = {
+                          status: 'portal_unreachable_or_rejected',
+                          source: portal.source,
+                          attemptedUrl: ESERV_LOGIN_URL,
+                          error: portal.error,
+                          localMirrorRecord: localRec
+                            ? { found: true, note: 'این رکورد واقعی از آینه فقط-خواندنی داخلی (جدول مشترکین) است، نه از پورتال.', record: localRec }
+                            : { found: false },
                         };
+                        logSystem('WARN', `Portal login failed for bill ${billId}: ${portal.error}`);
                       }
-
-                      responseData = {
-                        status: 'success',
-                        message: `شناسه قبض ${billId} با موفقیت در فیلد lgnBillIdnt1 درج شد و فرم لاگین ارسال گردید.`,
-                        subscriberInfo: dbRecord || 'مشترک در پایگاه داده محلی یافت نشد.',
-                        webServerResult: webResponseData
-                      };
                     } catch (e: any) {
                       responseData = { error: 'Failed to process bill login: ' + e.message };
                     }
@@ -2181,55 +2166,64 @@ async function startServer() {
                     }
                     break;
                   }
+                  case 'getEservPortalStatus': {
+                    safeSend(clientWs, { statusUpdate: 'در حال بررسی زنده دسترسی به سامانه مشترکین...' });
+                    try {
+                      const probe = await probeEservReachable();
+                      responseData = {
+                        url: ESERV_LOGIN_URL,
+                        reachable: probe.reachable,
+                        httpStatus: probe.httpStatus ?? null,
+                        latencyMs: probe.latencyMs,
+                        error: probe.error ?? null,
+                        checkedAt: new Date().toISOString(),
+                      };
+                    } catch (e: any) {
+                      responseData = { error: e.message };
+                    }
+                    break;
+                  }
                   case 'loginToCustomerPortal': {
-                    safeSend(clientWs, { statusUpdate: 'در حال ورود به سامانه مشترکین eserv.bargh-ilam.ir و استخراج پروفایل...' });
+                    safeSend(clientWs, { statusUpdate: 'در حال ورود واقعی به سامانه مشترکین eserv.bargh-ilam.ir با شناسه قبض...' });
                     try {
                       const billId = faToEnDigits(String(call.args?.billId || '')).replace(/\D/g, '');
                       if (!billId) { responseData = { error: 'شناسه قبض وارد نشده است.' }; break; }
+
+                      // 1) REAL browser session against the public portal form.
+                      const portal = await portalLoginWithBillId(billId);
+
+                      // 2) Read-only subscriber DB (live SQL backend or official CSV mirror).
                       const rec = findBillingRecordByBillId(billId);
-                      if (!rec) {
-                        responseData = { status: 'not_found', message: `پروفایلی برای شناسه قبض ${billId} در سامانه وجود ندارد.` };
-                        break;
+                      const bill = rec ? computeBillForSubscriber(rec) : null;
+
+                      if (portal.ok) {
+                        responseData = {
+                          status: 'success',
+                          source: portal.source,
+                          session: { authenticatedVia: 'eserv.bargh-ilam.ir live form submit', billId, finalUrl: portal.finalUrl, title: portal.title },
+                          portalTabs: portal.tabs,
+                          localDbProfile: rec ? { name: rec.name, nationalId: (rec as any).nationalId, phone: rec.phone, region: rec.region, fileNo: (rec as any).fileNo, servNo: (rec as any).servNo, meterSerial: (rec as any).meterSerial } : null,
+                          currentBillFromLocalCore: bill,
+                          capturedAt: portal.capturedAt,
+                        };
+                        logSystem('INFO', `Portal login for ${billId} succeeded: ${portal.tabs.length} tabs from ${portal.finalUrl}`);
+                      } else {
+                        // Portal unreachable/rejected → honest answer; local data labeled clearly.
+                        responseData = {
+                          status: rec ? 'portal_failed_local_mirror_only' : 'failed',
+                          attemptedUrl: ESERV_LOGIN_URL,
+                          portalError: portal.error,
+                          profile: rec ? {
+                            sourceNote: 'داده‌های زیر از آینه فقط-خواندنی داخلی (ردیف‌های فیزیکی جدول مشترکین) است — نه از پورتال زنده.',
+                            name: rec.name, nationalId: (rec as any).nationalId, phone: rec.phone, smsPhone: (rec as any).smsPhone,
+                            address: (rec as any).address, region: rec.region, customerType: (rec as any).customerType,
+                            fileNo: (rec as any).fileNo, servNo: (rec as any).servNo, meterSerial: (rec as any).meterSerial, tariffCode: (rec as any).tariffCode,
+                          } : null,
+                          currentBill: bill,
+                          consumption: rec ? { averageKwh: (rec as any).averageConsumption, lastPeriodKwh: bill?.consumptionKwh } : null,
+                        };
+                        logSystem('WARN', `Portal login failed for ${billId}: ${portal.error}`);
                       }
-                      // Real login attempt against the portal (network may be restricted from this host).
-                      let portalAttempt: any;
-                      try {
-                        const params = new URLSearchParams();
-                        params.append('lgnBillIdnt', billId);
-                        params.append('sbmt1', 'norm');
-                        const resp = await axios.post('https://eserv.bargh-ilam.ir/Home/Login', params.toString(), {
-                          timeout: 3000,
-                          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://eserv.bargh-ilam.ir/Home/Login' },
-                        });
-                        portalAttempt = { reachable: true, httpStatus: resp.status };
-                      } catch (e: any) {
-                        portalAttempt = { reachable: false, note: 'اتصال مستقیم به پورتال از این میزبان ممکن نشد؛ داده‌ها از هست صورتحساب داخلی استخراج شد.', error: e?.message };
-                      }
-                      const bill = computeBillForSubscriber(rec);
-                      const history: any[] = [bill];
-                      const extraPeriods = (Number((rec as any).daysOverdue) || 0) > 90 ? 2 : 1;
-                      for (let i = 1; i <= extraPeriods; i++) {
-                        const prev = { ...rec, daysOverdue: 0, debt: 0 };
-                        const older: any = computeBillForSubscriber(prev);
-                        older.period = jalaliMonthLabel(-2 - i);
-                        older.amountPaidRial = older.amountsRial.total;
-                        older.paid = true;
-                        history.push(older);
-                      }
-                      responseData = {
-                        status: 'success',
-                        session: { authenticatedVia: 'billing-core', billId, subscriberName: rec.name },
-                        personalInfo: {
-                          name: rec.name, nationalId: (rec as any).nationalId, phone: rec.phone, smsPhone: (rec as any).smsPhone,
-                          address: (rec as any).address, region: rec.region, customerType: (rec as any).customerType,
-                          fileNo: (rec as any).fileNo, servNo: (rec as any).servNo, meterSerial: (rec as any).meterSerial, tariffCode: (rec as any).tariffCode,
-                        },
-                        currentBill: bill,
-                        billingHistory: history,
-                        consumption: { averageKwh: (rec as any).averageConsumption, lastPeriodKwh: bill.consumptionKwh, powerDemandKw: bill.powerDemandKw, lastYearPeakKw: bill.lastYearPeakKw },
-                        portalAttempt,
-                      };
-                      logSystem('INFO', `Portal session opened for bill ${billId} (${rec.name}) via billing core.`);
                     } catch (e: any) {
                       responseData = { error: 'Portal login failed: ' + e.message };
                     }
