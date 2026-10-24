@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#07101f"><title>NAVA | آواتار زنده</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./nava.css">
+</head>
+<body>
+<main class="stage" id="stage">
+  <img class="scene" src="./مرجع.png" alt="تصویر مرجع آواتار ناوا" fetchpriority="high">
+  <div class="shade"></div>
+  <header class="brand glass"><div class="brandmark"><span>ϟ</span></div><div><b>NAVA</b><small>AI Live Avatar</small></div><i></i><p>همیشه در کنار شما<br><small>گفتگو، شنیدن، درک، پاسخ</small></p></header>
+  <div class="online glass"><span class="dot"></span><b>آنلاین</b><small id="connectionText">آماده پاسخ‌گویی</small></div>
+  <nav class="rail glass" aria-label="ناوبری">
+    <button data-mode="voice" class="navitem active" title="مکالمه صوتی"><span>♩</span><small>مکالمه صوتی</small></button>
+    <button data-mode="chat" class="navitem" title="چت متنی"><span>▢</span><small>چت متنی</small></button>
+    <button id="settingsOpen" class="navitem" title="تنظیمات"><span>⚙</span><small>تنظیمات</small></button>
+    <button id="exitBtn" class="navitem" title="پایان مکالمه"><span>⏻</span><small>پایان</small></button>
+  </nav>
+  <section class="chat glass" id="chatPanel" aria-label="گفتگو">
+    <div class="panelhead"><strong>مکالمه</strong><span id="messageCount">۰ پیام</span></div>
+    <div class="messages" id="messages" aria-live="polite">
+      <div class="bubble user">سلام، حالت چطوره؟</div>
+      <div class="bubble assistant">سلام! خیلی خوبم، ممنون که با من صحبت می‌کنی. امیدوارم حال شما هم خوب باشه. امروز چطور می‌تونم کمکتون کنم؟</div>
+    </div>
+    <form id="chatForm" class="composer"><input id="chatInput" autocomplete="off" placeholder="پیامت رو بنویس..." aria-label="متن پیام"><button aria-label="ارسال پیام" type="submit">➤</button></form>
+  </section>
+  <section class="wavecard glass"><div class="wave" id="wave" aria-label="نمایشگر صدا"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><span id="voiceStatus">در حال گوش دادن...</span></section>
+  <div class="connection glass"><span class="dot"></span><span id="modeStatus">اتصال صوتی آماده — بلادرنگ</span></div>
+  <div class="callbar glass">
+    <button id="settingsQuick" title="تنظیمات">⚙</button><button id="muteBtn" title="قطع/وصل میکروفون">♩̸</button>
+    <button id="micBtn" class="mic" title="شروع یا توقف شنیدن"><span>🎙</span></button>
+    <button id="stopBtn" class="hang" title="قطع پاسخ صوتی">☎</button><button id="videoBtn" title="حالت آواتار">▣</button>
+  </div>
+  <div class="settings glass" id="settingsPanel" hidden><button class="close" id="settingsClose">×</button><h3>تنظیمات مکالمه</h3><label>مدل OpenRouter<input id="modelInput" value="openai/gpt-4o-mini"></label><label>زبان گفتار<select id="langInput"><option value="fa-IR">فارسی</option><option value="en-US">English</option></select></label><label>پاسخ صوتی <input id="speechToggle" type="checkbox" checked></label><p>کلید API را فقط در فایل .env سرور وارد کنید؛ در مرورگر ذخیره نمی‌شود.</p></div>
+  <div class="toast" id="toast" role="status"></div>
+</main>
+<script type="module" src="./nava.js"></script>
+</body></html>
